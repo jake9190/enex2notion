@@ -207,7 +207,7 @@ def _convert_note_blocks(note_blocks):
         converted_blocks = converted if isinstance(converted, list) else [converted]
         if block.__class__.__name__ != "NotionTableBlock" and block.children:
             parent = converted_blocks[-1]
-            parent[parent["type"]]["children"] = _convert_note_blocks(block.children)
+            parent[parent["type"]].setdefault("children", []).extend(_convert_note_blocks(block.children))
         api_blocks.extend(converted_blocks)
     return api_blocks
 

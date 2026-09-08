@@ -91,7 +91,10 @@ def _extract_nested_lists(element: Tag):
         # Remove it from the element so it doesn't appear in text extraction
         wrapper = nested_list.parent
         nested_list.extract()
-        while wrapper is not element and not wrapper.contents:
+        while wrapper is not element and all(
+            isinstance(child, NavigableString) and not child.strip(" \t\r\n\f")
+            for child in wrapper.contents
+        ):
             parent = wrapper.parent
             wrapper.extract()
             wrapper = parent

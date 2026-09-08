@@ -1,13 +1,14 @@
 import logging
-import re
 
 from bs4 import Tag
+from tinycss2 import parse_declaration_list, serialize
 
 from enex2notion.note_parser.string_extractor import extract_string
 from enex2notion.notion_blocks.container import NotionCodeBlock, NotionCalloutBlock
 from enex2notion.notion_blocks.list import NotionTodoBlock
 from enex2notion.notion_blocks.minor import NotionBookmarkBlock
 from enex2notion.notion_blocks.text import NotionTextBlock, TextProp
+from enex2notion.parse_warnings import add_warning
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +16,8 @@ logger = logging.getLogger(__name__)
 def parse_div(element: Tag):
     style = element.get("style", "")
 
-    # Tasks, skipping those
     if "en-task-group" in style:
-        logger.debug("Skipping task block")
-        return None
+        return _parse_container(element)
 
     # Google drive links
     if "en-richlink" in style:
@@ -52,33 +51,39 @@ def parse_text(element: Tag):
 
 
 def parse_richlink(element: Tag):
-    url = re.match(".*en-href:(.*?);", element["style"]).group(1).strip()
+    url = _style_value(element, "en-href")
+    if not url:
+        add_warning("Rich link missing URL; preserved its available content")
+        return _parse_container(element)
 
     return NotionBookmarkBlock(url=url)
 
 
+def _style_value(element: Tag, name: str):
+    for declaration in parse_declaration_list(element.get("style", "")):
+        if declaration.type == "declaration" and declaration.name.lstrip("-") == name:
+            return serialize(declaration.value).strip().strip("\"'")
+    return ""
+
+
+def _parse_container(element: Tag):
+    from enex2notion.note_parser.blocks import parse_note_blocks
+
+    return parse_note_blocks(element)
+
+
 def parse_embedded_webclip(element: Tag):
-    """Parse embedded webclip div as a callout block with the source URL.
-    
-    Embedded webclips contain complex HTML (often entire web pages or documents).
-    Instead of trying to parse all that complexity, we convert it to a callout
-    that references the original source URL.
-    """
-    style = element.get("style", "")
-    
-    # Extract source URL from style attribute
-    source_url_match = re.search(r"--en-clipped-source-url:\s*([^;]+)", style)
-    source_title_match = re.search(r"--en-clipped-source-title:\s*([^;]+)", style)
-    
-    source_url = source_url_match.group(1).strip() if source_url_match else "Unknown source"
-    source_title = source_title_match.group(1).strip() if source_title_match else "Embedded web clip"
+    """Preserve the saved clip body alongside its source information."""
+    source_url = _style_value(element, "en-clipped-source-url") or "Unknown source"
+    source_title = _style_value(element, "en-clipped-source-title") or "Embedded web clip"
     
     # Create a callout with link to the original source
     callout_text = f"📎 {source_title}\nSource: {source_url}"
     
     logger.info(f"Converting embedded webclip to callout: {source_title}")
     
-    return NotionCalloutBlock(
+    callout = NotionCalloutBlock(
         icon="📎",
         text_prop=TextProp(callout_text)
     )
+    return [callout, *_parse_container(element)]

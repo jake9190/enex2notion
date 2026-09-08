@@ -1,4 +1,4 @@
-from bs4 import Tag
+from bs4 import NavigableString, Tag
 
 BLOCK_TAGS = (
     "div",
@@ -67,7 +67,10 @@ def flatten_root(root: Tag):
 
             div.extract()
 
-    empty_divs = [d for d in root.find_all("div", recursive=False) if not d.contents]
+    empty_divs = [
+        div for div in root.find_all("div", recursive=False)
+        if not _has_inline_content(div.contents)
+    ]
     for d in empty_divs:
         d.extract()
 
@@ -82,16 +85,23 @@ def _group_inline_tags(elements: list[Tag]):
         if is_inline_tag:
             group.append(tag)
         else:
-            if group:
+            if _has_inline_content(group):
                 blocks.append(_make_block(group))
-                group = []
+            group = []
 
             blocks.append(tag)
 
-    if group:
+    if _has_inline_content(group):
         blocks.append(_make_block(group))
 
     return blocks
+
+
+def _has_inline_content(elements):
+    return any(
+        not isinstance(element, NavigableString) or element.strip(" \t\r\n\f")
+        for element in elements
+    )
 
 
 def _make_block(elements: list[Tag]):

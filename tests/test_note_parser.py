@@ -456,6 +456,7 @@ def test_inline_code_with_code_block(parse_html):
     assert parse_note_blocks(test_note) == [
         NotionTextBlock(text_prop=TextProp("for CLI mpeg-4 file compression - ")),
         NotionTextBlock(text_prop=inline_code_prop),
+        NotionTextBlock(text_prop=TextProp("")),
         NotionTextBlock(
             text_prop=TextProp(
                 "Develop additional cli option for explicit trim and video file processing"
@@ -594,7 +595,7 @@ def test_text_block_todo(parse_html):
     ]
 
 
-def test_skipped_blocks(parse_html):
+def test_task_group_preserved_and_encrypted_block_skipped(parse_html):
     test_note = parse_html(
         '<div style="--en-task-group:true;">'
         "   <div>irrelevant stuff</div>"
@@ -602,7 +603,7 @@ def test_skipped_blocks(parse_html):
         "<en-crypt>irrelevant stuff</en-crypt>"
     )
 
-    assert parse_note_blocks(test_note) == []
+    assert parse_note_blocks(test_note) == [NotionTextBlock(text_prop=TextProp("irrelevant stuff"))]
 
 
 def test_extracted_blocks(parse_html):

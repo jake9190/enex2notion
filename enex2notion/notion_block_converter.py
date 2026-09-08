@@ -244,46 +244,40 @@ def _convert_text_block(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
     return blocks if len(blocks) > 1 else blocks[0]
 
 
-def _convert_heading(notion_block, level: int) -> dict[str, Any]:
-    """Convert heading block."""
+def _convert_rich_text_block(notion_block, block_type: str, **attributes):
     text_prop = getattr(notion_block, "text_prop", None)
-    
-    heading_type = f"heading_{level}"
-    return {
-        "type": heading_type,
-        heading_type: {
-            "rich_text": _convert_text_prop(text_prop) if text_prop else [],
-            "color": "default"
-        }
-    }
+    rich_text, overflow = _convert_text_prop_with_overflow(text_prop) if text_prop else ([], [])
+    block = {"type": block_type, block_type: {"rich_text": rich_text, **attributes}}
+    if not overflow:
+        return block
+
+    if block_type in {"bulleted_list_item", "numbered_list_item", "to_do", "callout"}:
+        block[block_type]["children"] = [
+            {"type": "paragraph", "paragraph": {"rich_text": chunk, "color": "default"}}
+            for chunk in overflow
+        ]
+        return block
+
+    return [block] + [
+        {"type": block_type, block_type: {"rich_text": chunk, **attributes}}
+        for chunk in overflow
+    ]
+
+
+def _convert_heading(notion_block, level: int) -> dict[str, Any] | list[dict[str, Any]]:
+    """Convert heading block."""
+    return _convert_rich_text_block(notion_block, f"heading_{level}", color="default")
 
 
 def _convert_list_item(notion_block, list_type: str) -> dict[str, Any]:
     """Convert list item block."""
-    text_prop = getattr(notion_block, "text_prop", None)
-    
-    return {
-        "type": list_type,
-        list_type: {
-            "rich_text": _convert_text_prop(text_prop) if text_prop else [],
-            "color": "default"
-        }
-    }
+    return _convert_rich_text_block(notion_block, list_type, color="default")
 
 
 def _convert_todo(notion_block) -> dict[str, Any]:
     """Convert todo block."""
-    text_prop = getattr(notion_block, "text_prop", None)
     checked = notion_block.attrs.get("checked", False)
-    
-    return {
-        "type": "to_do",
-        "to_do": {
-            "rich_text": _convert_text_prop(text_prop) if text_prop else [],
-            "checked": checked,
-            "color": "default"
-        }
-    }
+    return _convert_rich_text_block(notion_block, "to_do", checked=checked, color="default")
 
 
 def _convert_divider(notion_block) -> dict[str, Any]:
@@ -333,46 +327,23 @@ def _convert_bookmark(notion_block) -> dict[str, Any]:
     }
 
 
-def _convert_code(notion_block) -> dict[str, Any]:
+def _convert_code(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
     """Convert code block."""
-    text_prop = getattr(notion_block, "text_prop", None)
     language = notion_block.attrs.get("language", "plain text")
-    
-    return {
-        "type": "code",
-        "code": {
-            "rich_text": _convert_text_prop(text_prop) if text_prop else [],
-            "language": language
-        }
-    }
+    return _convert_rich_text_block(notion_block, "code", language=language)
 
 
-def _convert_quote(notion_block) -> dict[str, Any]:
+def _convert_quote(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
     """Convert quote block."""
-    text_prop = getattr(notion_block, "text_prop", None)
-    
-    return {
-        "type": "quote",
-        "quote": {
-            "rich_text": _convert_text_prop(text_prop) if text_prop else [],
-            "color": "default"
-        }
-    }
+    return _convert_rich_text_block(notion_block, "quote", color="default")
 
 
 def _convert_callout(notion_block) -> dict[str, Any]:
     """Convert callout block."""
-    text_prop = getattr(notion_block, "text_prop", None)
     icon = notion_block.attrs.get("icon", "💡")
-    
-    return {
-        "type": "callout",
-        "callout": {
-            "rich_text": _convert_text_prop(text_prop) if text_prop else [],
-            "icon": {"type": "emoji", "emoji": icon},
-            "color": "default"
-        }
-    }
+    return _convert_rich_text_block(
+        notion_block, "callout", icon={"type": "emoji", "emoji": icon}, color="default"
+    )
 
 
 def _convert_image(notion_block) -> dict[str, Any]:
@@ -826,7 +797,6 @@ def _convert_table(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
     
     for idx, row in enumerate(notion_block.children):
         row_cells = []
-        needs_continuation = False
         continuation_rows_data = []
         
         # Extract cell content from each column
@@ -839,7 +809,6 @@ def _convert_table(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
             
             # Track if any cell needs continuation
             if continuation_chunks:
-                needs_continuation = True
                 # Ensure we have enough continuation rows
                 while len(continuation_rows_data) < len(continuation_chunks):
                     continuation_rows_data.append([[] for _ in range(len(notion_block._columns))])
@@ -859,37 +828,17 @@ def _convert_table(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
             header_row = row_dict
         else:
             all_table_rows.append(row_dict)
-            
-            # Add continuation rows if needed
-            if needs_continuation:
-                for cont_idx, cont_cells in enumerate(continuation_rows_data):
-                    # Fill empty cells with empty rich_text
-                    cont_cells = [
-                        cell if cell else [{"type": "text", "text": {"content": ""}}]
-                        for cell in cont_cells
+
+        for continuation_cells in continuation_rows_data:
+            all_table_rows.append({
+                "type": "table_row",
+                "table_row": {
+                    "cells": [
+                        cell or [{"type": "text", "text": {"content": ""}}]
+                        for cell in continuation_cells
                     ]
-                    # Add warning marker to first cell of continuation row
-                    if cont_cells and cont_idx == 0:  # Only mark first continuation row
-                        warning_marker = {
-                            "type": "text",
-                            "text": {"content": "⚠️ "},
-                            "annotations": {
-                                "bold": False,
-                                "italic": False,
-                                "strikethrough": False,
-                                "underline": False,
-                                "code": False,
-                                "color": "orange"
-                            }
-                        }
-                        cont_cells[0] = [warning_marker] + cont_cells[0]
-                    
-                    all_table_rows.append({
-                        "type": "table_row",
-                        "table_row": {
-                            "cells": cont_cells
-                        }
-                    })
+                }
+            })
     
     # Check if we need to split the table (Notion limit: 100 rows including header)
     # If we have a header, max data rows = 99; without header, max = 100
