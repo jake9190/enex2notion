@@ -947,6 +947,7 @@ class NotionAPIWrapper:
         
         create_data = create_response.json()
         upload_id = create_data["id"]
+        mime_type = create_data.get("content_type") or mime_type
         logger.debug(f"  Upload ID: {upload_id}")
         
         # Step 2: Send file contents
@@ -1032,6 +1033,7 @@ class NotionAPIWrapper:
         
         create_data = create_response.json()
         upload_id = create_data["id"]
+        mime_type = create_data.get("content_type") or mime_type
         part_urls = create_data.get("part_urls", [])
         
         if len(part_urls) != num_chunks:

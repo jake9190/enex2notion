@@ -206,6 +206,10 @@ Attachment preparation happens before page changes. If an attachment fails,
 re-import reports its filename and available rejection reason, preserves the
 original page, and stops without creating a recovery record or import baseline.
 Successfully uploaded but unattached files may still exist temporarily in Notion.
+File sends use the content type returned by Notion when the upload is created,
+falling back to the ENEX type only when no type is returned. This handles files
+such as PNG attachments exported as `application/octet-stream` without changing
+their bytes, filenames, or block types.
 An older version may have left a `prepared` record after an attachment failure.
 Only move that record out of the backup directory after confirming the traceback
 stopped during attachment preparation and the original page is intact; `prepared`

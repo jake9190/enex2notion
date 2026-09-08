@@ -4,8 +4,66 @@ import httpx
 import pytest
 from notion_client import Client
 
-from enex2notion.enex_uploader import _upload_block_tree
+from enex2notion.enex_types import EvernoteResource
+from enex2notion.enex_uploader import _process_image_blocks, _upload_block_tree
 from enex2notion.notion_api_wrapper import NOTION_API_VERSION, NotionAPIWrapper
+from enex2notion.notion_blocks.uploadable import NotionFileBlock
+
+
+@pytest.mark.parametrize("method", ["_upload_file_singlepart", "_upload_file_multipart"])
+@pytest.mark.parametrize("creation_fields,source_type,expected_type", [
+    ({"content_type": "image/png"}, "application/octet-stream", "image/png"),
+    ({"content_type": "image/png"}, "image/jpeg", "image/png"),
+    ({"content_type": "application/octet-stream"}, "image/png", "application/octet-stream"),
+    ({"content_type": None}, "application/pdf", "application/pdf"),
+    ({"content_type": ""}, "application/pdf", "application/pdf"),
+    ({}, "application/pdf", "application/pdf"),
+])
+def test_file_send_uses_content_type_from_creation(mocker, method, creation_fields, source_type, expected_type):
+    file_data = b"\x89PNG\r\n\x1a\nimage bytes"
+    sends = []
+
+    def post(url, **options):
+        if url.endswith("/file_uploads"):
+            return httpx.Response(200, json={
+                "id": "upload", "part_urls": ["unused"], **creation_fields,
+            })
+        if url.endswith("/send"):
+            sends.append(options["files"]["file"])
+            if options["files"]["file"][2] != expected_type:
+                return httpx.Response(400, json={"message": f"Current file content type does not match {expected_type}"})
+        return httpx.Response(200, json={"id": "upload"})
+
+    mocker.patch("enex2notion.notion_api_wrapper.requests.post", side_effect=post)
+    wrapper = NotionAPIWrapper("test-token")
+    wrapper._rate_limit_delay = 0
+    result = getattr(wrapper, method)(file_data, "photo.png", source_type)
+
+    assert result == "upload"
+    assert sends == [("photo.png", file_data, expected_type)]
+
+
+def test_generic_enex_file_gets_upload_id_with_notion_image_content_type(mocker):
+    file_data = b"\x89PNG\r\n\x1a\nimage bytes"
+    resource = EvernoteResource(file_data, len(file_data), "hash", "application/octet-stream", "photo.png")
+    block = NotionFileBlock(md5_hash="hash", resource=resource)
+
+    def post(url, **options):
+        if url.endswith("/file_uploads"):
+            return httpx.Response(200, json={"id": "upload", "content_type": "image/png"})
+        assert options["files"]["file"] == ("photo.png", file_data, "image/png")
+        return httpx.Response(200, json={"id": "upload", "status": "uploaded"})
+
+    request = mocker.patch("enex2notion.notion_api_wrapper.requests.post", side_effect=post)
+    wrapper = NotionAPIWrapper("test-token")
+    wrapper._rate_limit_delay = 0
+    warnings = _process_image_blocks([block], wrapper)
+
+    assert warnings == []
+    assert block.attrs["file_upload_id"] == "upload"
+    assert not block.attrs.get("upload_failed")
+    assert resource.mime == "application/octet-stream"
+    assert request.call_count == 2
 
 
 def test_database_schema_requests_use_legacy_api_version(mocker):
