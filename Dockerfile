@@ -1,23 +1,18 @@
-FROM debian:12-slim AS build
+FROM python:3.12-slim-bookworm AS build
 
-ENV BUILD_POETRY_VERSION=1.6.1
-
-RUN apt-get update && \
-    apt-get install --no-install-suggests --no-install-recommends --yes python3-venv python3-pip && \
-    python3 -m venv /venv && \
+RUN python -m venv /venv && \
     /venv/bin/pip install --upgrade pip
-
-RUN pip3 install --break-system-packages poetry==$BUILD_POETRY_VERSION
 
 FROM build AS build-venv
 
 COPY . /app
 WORKDIR /app
 
-RUN poetry build --no-interaction -f wheel
-RUN /venv/bin/pip install --disable-pip-version-check dist/*.whl
+RUN /venv/bin/pip wheel --disable-pip-version-check --no-deps --wheel-dir dist .
+RUN /venv/bin/pip install --disable-pip-version-check -r requirements.txt && \
+    /venv/bin/pip install --disable-pip-version-check --no-deps dist/*.whl
 
-FROM gcr.io/distroless/python3-debian12
+FROM python:3.12-slim-bookworm
 
 ENV INSIDE_DOCKER_CONTAINER=1
 
