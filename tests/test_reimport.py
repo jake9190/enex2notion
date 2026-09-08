@@ -174,6 +174,18 @@ def test_canonical_attachment_reference_keeps_identity():
     }
 
 
+@pytest.mark.parametrize("heading_type", ["heading_1", "heading_2", "heading_3"])
+def test_default_heading_toggle_compares_equal(heading_type):
+    proposed = {"type": heading_type, heading_type: {"rich_text": [
+        {"type": "text", "text": {"content": "Heading"}},
+    ]}}
+    existing = copy.deepcopy(proposed)
+    existing[heading_type]["is_toggleable"] = False
+    assert canonical(existing) == canonical(proposed)
+    existing[heading_type]["is_toggleable"] = True
+    assert canonical(existing) != canonical(proposed)
+
+
 def test_empty_paragraph_representations_compare_equal():
     empty = {"type": "paragraph", "paragraph": {"rich_text": []}}
     explicit = {"type": "paragraph", "paragraph": {"rich_text": [
@@ -188,6 +200,19 @@ def test_empty_paragraph_representations_compare_equal():
     with_children = copy.deepcopy(explicit)
     with_children["paragraph"]["children"] = [empty]
     assert canonical(empty) != canonical(with_children)
+
+
+@pytest.mark.parametrize("level", [1, 2, 3])
+def test_default_heading_toggle_does_not_replace_heading(importer, level):
+    snapshot = make_snapshot(text="Heading")
+    heading = snapshot["blocks"][0]
+    heading["type"] = f"heading_{level}"
+    heading[heading["type"]] = heading.pop("paragraph")
+    heading[heading["type"]]["is_toggleable"] = False
+    importer.remote.snapshot.return_value = snapshot
+    plan = make_plan(importer, make_note(content=f"<h{level}>Heading</h{level}>"))
+    assert plan["action"] == "unchanged"
+    assert plan["retained"][0]["id"] == "old"
 
 
 def test_empty_paragraph_is_retained_during_reimport(importer):
@@ -327,6 +352,20 @@ def test_edit_during_upload_prevents_archiving(importer, mocker):
         importer.execute(plan)
     importer.remote.archive.assert_not_called()
     importer.remote.update_properties.assert_not_called()
+
+
+@pytest.mark.parametrize("returned_ids", [["old"], ["old", "new"]])
+def test_recovery_never_labels_original_blocks_as_new(importer, mocker, tmp_path, returned_ids):
+    plan = make_plan(importer)
+    configure_success(importer, mocker)
+    importer.wrapper.append_blocks.return_value = [{"id": block_id} for block_id in returned_ids]
+    with pytest.raises(RuntimeError, match="recovery record"):
+        importer.execute(plan)
+    importer.remote.archive.assert_not_called()
+    importer.remote.update_properties.assert_not_called()
+    journal = json.loads(next((tmp_path / "reimport-backups").glob("*.json")).read_text())
+    assert journal["status"] == "incomplete"
+    assert journal["new_root_ids"] == [block_id for block_id in returned_ids if block_id != "old"]
 
 
 def test_database_properties_leave_custom_fields_alone(importer):

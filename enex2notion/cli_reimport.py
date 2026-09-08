@@ -89,7 +89,7 @@ def canonical(value):
         cleaned = canonical(item)
         if cleaned in (None, [], {}) or (key == "color" and cleaned == "default"):
             continue
-        if key in {"bold", "italic", "strikethrough", "underline", "code"} and cleaned is False:
+        if key in {"bold", "italic", "strikethrough", "underline", "code", "is_toggleable"} and cleaned is False:
             continue
         result[key] = cleaned
     return result
@@ -304,6 +304,7 @@ class Reimporter:
             raise RuntimeError("Preview cannot execute updates")
         snapshot = plan["snapshot"]
         page_id = snapshot["page"]["id"]
+        original_ids = {block["id"].replace("-", "").lower() for block in snapshot["blocks"]}
         if edit_signature(self.remote.snapshot(page_id)) != edit_signature(snapshot):
             raise RuntimeError("Page changed after planning; no content replaced")
         journal_path = self.directory / "reimport-backups" / f"{page_id}-{uuid4().hex}.json"
@@ -362,6 +363,8 @@ class Reimporter:
                     pending.append(additions[index])
             insert_pending()
             journal["new_root_ids"] = [block["id"] for block in new_roots]
+            if any(block_id.replace("-", "").lower() in original_ids for block_id in journal["new_root_ids"]):
+                raise RuntimeError("Append response included original block IDs; original blocks were not archived")
             journal["status"] = "replacement_uploaded"
             write_json(journal_path, journal)
             current = self.remote.snapshot(page_id)
@@ -386,7 +389,10 @@ class Reimporter:
         except Exception as error:
             journal["status"] = "incomplete"
             journal["error"] = str(error)
-            journal["new_root_ids"] = [block["id"] for block in new_roots]
+            journal["new_root_ids"] = [
+                block["id"] for block in new_roots
+                if block["id"].replace("-", "").lower() not in original_ids
+            ]
             write_json(journal_path, journal)
             raise RuntimeError(f"Re-import interrupted; stop and review recovery record {journal_path}: {error}") from error
 

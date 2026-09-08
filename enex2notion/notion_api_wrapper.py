@@ -331,6 +331,21 @@ class NotionAPIWrapper:
             List of created block objects
         """
         created_blocks = []
+        known_ids = set()
+        if after is not None and children:
+            params = {"block_id": block_id, "page_size": 100}
+            cursors = set()
+            while True:
+                time.sleep(self._rate_limit_delay)
+                existing = self._retry_on_rate_limit(self.client.blocks.children.list, **params)
+                known_ids.update(block["id"].replace("-", "").lower() for block in existing["results"])
+                if not existing.get("has_more"):
+                    break
+                cursor = existing.get("next_cursor")
+                if not cursor or cursor in cursors:
+                    raise RuntimeError("Cannot establish existing child IDs: invalid pagination cursor")
+                cursors.add(cursor)
+                params["start_cursor"] = cursor
 
         for i in range(0, len(children), max_batch):
             batch = children[i : i + max_batch]
@@ -341,11 +356,16 @@ class NotionAPIWrapper:
                 response = self._retry_on_rate_limit(
                     self.client.blocks.children.append, block_id=block_id, children=batch, **options
                 )
-                created_blocks.extend(response.get("results", []))
-                if len(response.get("results", [])) != len(batch):
+                appended = [
+                    block for block in response.get("results", [])
+                    if block["id"].replace("-", "").lower() not in known_ids
+                ]
+                created_blocks.extend(appended)
+                if len(appended) != len(batch):
                     return created_blocks
+                known_ids.update(block["id"].replace("-", "").lower() for block in appended)
                 if after is not None:
-                    after = response["results"][-1]["id"]
+                    after = appended[-1]["id"]
                 logger.debug(f"Appended {len(batch)} blocks to {block_id}")
             except APIResponseError as e:
                 # Rate limit errors are already handled in _retry_on_rate_limit

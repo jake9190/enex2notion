@@ -217,6 +217,16 @@ expected and returned counts, and returned root IDs are recorded for inspection.
 Older versions did not record IDs from a mismatched batch, so an empty
 `new_root_ids` list does not prove that the failed request created nothing.
 
+Anchored inserts read existing child IDs with pagination before writing, so
+append responses containing existing siblings are filtered to new blocks only.
+Omitted heading `is_toggleable` and explicit `false` compare equally; `true`
+remains a meaningful difference.
+
+Some older recovery records may include original sibling IDs in `new_root_ids`.
+Always compare that list with `original.blocks` and exclude all original IDs
+before considering any block for removal. Do not bulk-delete blocks based only
+on `new_root_ids`. Current records exclude original root IDs on failures.
+
 For an interrupted replacement, inspect its original block IDs, newly created
 root IDs, and archived IDs. Restore the original blocks (unarchive if necessary)
 and remove the added blocks in Notion before moving the incomplete record out of
