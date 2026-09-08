@@ -6,6 +6,7 @@ from enex2notion.enex_types import EvernoteNote
 from enex2notion.enex_uploader import upload_note
 from enex2notion.enex_uploader_modes import get_notebook_database, get_notebook_page
 from enex2notion.exception_tracker import ExceptionTracker
+from enex2notion.import_state import ImportRemote, ImportState
 from enex2notion.note_parser.note import parse_note
 from enex2notion.summary_report import NotebookStats
 from enex2notion.utils_exceptions import NoteUploadFailException
@@ -102,6 +103,7 @@ class EnexUploader(object):
             cache_dir = Path.cwd()
         
         logger.debug(f"Using cache directory: {cache_dir}")
+        self.import_state = ImportState(cache_dir) if wrapper else None
         
         # Initialize exception tracker for partial imports
         self.exception_tracker = ExceptionTracker(wrapper, root_id, cache_dir) if wrapper else None
@@ -304,6 +306,13 @@ class EnexUploader(object):
                             block_id=None  # No block-level link available for inline URLs
                         )
             
+            if self.import_state and not has_errors:
+                try:
+                    snapshot = ImportRemote(self.wrapper).snapshot(page_id)
+                    self.import_state.record(self.notebook_root, note, snapshot)
+                except Exception as error:
+                    logger.warning(f"Could not record import baseline for '{note.title}': {error}")
+
             return "success", None
         except NoteUploadFailException as e:
             error_msg = str(e)

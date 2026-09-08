@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add in-place `--reimport` with notebook-scoped matching and `--whatif N` read-only diffs.
+- Add timezone-aware `--skip-edited-after` and baseline-backed `--skip-changed-since-import` safeguards.
+- Record successful import baselines and replacement recovery records without modifying Notion database schemas.
+
 - Preserve bulleted and numbered list nesting inside ENEX wrapper elements.
 - Upload child blocks instead of dropping nested list content, using batches of
 	at most 100 blocks per level and reporting child upload failures as partial imports.

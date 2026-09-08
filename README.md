@@ -108,6 +108,76 @@ $ enex2notion
 
 ## Usage
 
+### Re-import Existing Notes
+
+Re-import replaces note content in the **same Notion page**, retaining its page ID
+and page links. It does not merge edits. Existing blocks are archived and replaced,
+so links to individual old blocks and their comments are not transferred.
+
+Start with a read-only preview of at most five selected notes:
+
+```shell
+python -m enex2notion Notebook.enex --use-env --reimport --whatif 5 --operations-dir ./operations
+```
+
+The preview shows per-note skip reasons and before/after JSON diffs for blocks,
+formatting, nesting, and imported metadata. The limit is global across input files
+and counts skipped and unchanged notes too. `--note TITLE` and `--note-index N`
+still filter the source notes. Preview requires Notion read access but makes no
+Notion writes, attachment uploads, log writes, or operational-file changes.
+Attachment placeholders identify the ENEX hash and filename; actual updates
+re-upload attachments and are subject to Notion's upload validation.
+
+Apply replacements, protecting notes edited after a cutoff:
+
+```shell
+python -m enex2notion Notebook.enex --use-env --reimport --skip-edited-after "2026-09-01T00:00:00Z" --operations-dir ./operations
+```
+
+Use an ISO 8601 timestamp with a timezone (`Z` or an offset such as `-04:00`).
+Notes whose page or nested blocks have a later edit timestamp are skipped;
+an edit exactly at the cutoff is allowed. Edits by integrations count too.
+
+For notes with a recorded import baseline:
+
+```shell
+python -m enex2notion Notebook.enex --use-env --reimport --skip-changed-since-import --operations-dir ./operations
+```
+
+Successful new imports and re-imports now save page mappings and page/block edit
+timestamps in `import-state.json`. Keep using the same operations directory.
+Without `--operations-dir`, both import paths use the parent of an absolute
+`--done-file`, then the parent of an absolute `--unsupported-files`, otherwise the
+current directory. The since-import flag skips notes with no known
+baseline, including older imports: Notion's current edit time alone cannot prove
+whether a note has changed since import. Both protection flags can be combined.
+
+Matching is restricted to the existing root and notebook (the ENEX filename without
+its extension), in the selected `--mode DB` or `--mode PAGE`. A recorded page ID
+takes precedence; older imports require a unique exact title match. Missing or
+ambiguous notebooks/pages, duplicate source titles, empty/failed conversions, and
+pages containing child pages/databases or synced/unsupported blocks are skipped.
+Re-import does not create missing notes or use done-file hashes to skip updates.
+Keep source titles and creation timestamps stable to reuse recorded identities.
+Unrelated database properties, page icons, and covers are left alone; standard
+imported title, Created, Updated, URL, Tags, and Partial Import fields are updated.
+
+Before replacing content, the importer writes a JSON recovery record under
+`operations/reimport-backups/`, uploads new blocks, rechecks the original content,
+then archives old blocks. Failed requests stop the run and leave an incomplete
+record that blocks automatic retries for that page. These records contain note
+content and should be protected like the ENEX files. They are recovery records,
+not self-contained attachment backups; Notion-hosted file URLs may expire.
+
+For an interrupted replacement, inspect its original block IDs, newly created
+root IDs, and archived IDs. Restore the original blocks (unarchive if necessary)
+and remove the added blocks in Notion before moving the incomplete record out of
+the backup directory. An interrupted response can leave blocks whose IDs were
+not returned, so inspect the page as well as the record. Do not simply rerun over
+an incomplete page. Notion has no atomic replacement or conditional-write API;
+avoid editing pages during a re-import, and do not run concurrent import processes
+against the same pages or state directory.
+
 ```shell
 $ enex2notion --help
 usage: enex2notion [-h] [--token TOKEN] [OPTION ...] FILE/DIR [FILE/DIR ...]

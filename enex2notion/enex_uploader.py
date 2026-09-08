@@ -8,7 +8,7 @@ from enex2notion.enex_types import EvernoteNote
 from enex2notion.image_handler import upload_image_to_notion
 from enex2notion.notion_block_converter import convert_block_to_api_format
 from enex2notion.notion_api_wrapper import note_to_database_properties
-from enex2notion.notion_blocks.uploadable import NotionImageBlock, NotionPDFBlock, NotionFileBlock
+from enex2notion.notion_blocks.uploadable import NotionUploadableBlock
 from enex2notion.parse_warnings import init_warnings, get_warnings, clear_warnings
 from enex2notion.partial_import_handler import create_error_summary_block, create_source_bookmark
 from enex2notion.utils_exceptions import NoteUploadFailException
@@ -76,7 +76,7 @@ def _collect_uploadable_blocks(blocks, uploadable_list):
         uploadable_list: Output list to append uploadable blocks to
     """
     for block in blocks:
-        if isinstance(block, (NotionImageBlock, NotionPDFBlock, NotionFileBlock)):
+        if isinstance(block, NotionUploadableBlock):
             uploadable_list.append(block)
         
         # Process children recursively
@@ -229,7 +229,7 @@ def _append_block_batch(wrapper, block_id, batch):
             time.sleep((2 ** attempt) * 0.5)
 
 
-def _upload_block_tree(wrapper, parent_id, api_blocks):
+def _upload_block_tree(wrapper, parent_id, api_blocks, uploaded_roots=None):
     """Append each level separately; tables must retain their initial row payload."""
     uploaded_blocks = []
     for start_idx in range(0, len(api_blocks), 100):
@@ -246,6 +246,8 @@ def _upload_block_tree(wrapper, parent_id, api_blocks):
         if len(result) != len(batch):
             raise RuntimeError("Notion returned an unexpected number of uploaded blocks")
         uploaded_blocks.extend(result)
+        if uploaded_roots is not None:
+            uploaded_roots.extend(result)
         for uploaded_block, child_blocks in zip(result, children):
             if child_blocks:
                 _upload_block_tree(wrapper, uploaded_block["id"], child_blocks)

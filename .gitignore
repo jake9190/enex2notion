@@ -1,4 +1,6 @@
 ### Custom ###
+import-state.json
+reimport-backups/
 .stuff/
 .local/
 enex2notion.txt  # Infrastructure cache file

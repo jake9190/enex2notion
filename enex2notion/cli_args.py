@@ -1,10 +1,28 @@
 import argparse
 import os
+from datetime import datetime
 from pathlib import Path
 
 from enex2notion.version import __version__
 
 HELP_ARGS_WIDTH = 29
+
+
+def _positive_count(value):
+    count = int(value)
+    if count < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return count
+
+
+def _aware_datetime(value):
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("use an ISO 8601 date/time with timezone") from error
+    if timestamp.tzinfo is None:
+        raise argparse.ArgumentTypeError("date/time must include a timezone, such as Z or -04:00")
+    return timestamp
 
 
 def parse_args(argv):
@@ -130,6 +148,24 @@ def parse_args(argv):
                 " makes sense only with PAGE mode"
             ),
         },
+        "--reimport": {
+            "action": "store_true",
+            "help": "replace previously imported notes in place; skip missing or ambiguous matches",
+        },
+        "--whatif": {
+            "type": _positive_count,
+            "metavar": "N",
+            "help": "with --reimport, preview changes for at most N selected notes without writing",
+        },
+        "--skip-edited-after": {
+            "type": _aware_datetime,
+            "metavar": "DATETIME",
+            "help": "with --reimport, skip notes edited in Notion after this timezone-qualified ISO date/time",
+        },
+        "--skip-changed-since-import": {
+            "action": "store_true",
+            "help": "with --reimport, skip notes changed since the recorded import baseline (or with no baseline)",
+        },
         "--tag": {
             "help": "add custom tag to uploaded notes",
         },
@@ -222,6 +258,13 @@ def parse_args(argv):
 
     args = parser.parse_args(argv)
 
+    if (args.whatif or args.skip_edited_after or args.skip_changed_since_import) and not args.reimport:
+        parser.error("--whatif and edit safeguards require --reimport")
+    if args.reimport and (args.resolve_links or args.retry_failed_links or args.check_duplicates):
+        parser.error("--reimport cannot be combined with link or duplicate commands")
+    if args.reimport and args.dry_run:
+        parser.error("use --reimport --whatif N for a read-only preview, not --dry-run")
+
     # Handle environment variable token
     if args.use_env:
         env_token = os.environ.get("NOTION_TOKEN")
@@ -234,6 +277,9 @@ def parse_args(argv):
     elif not args.token and "NOTION_TOKEN" in os.environ:
         # Auto-detect if not explicitly specified
         args.token = os.environ["NOTION_TOKEN"]
+
+    if args.reimport and not args.token:
+        parser.error("--reimport requires --token or NOTION_TOKEN, including for --whatif")
     
     # Validate arguments based on mode
     if args.resolve_links:

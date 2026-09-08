@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 def cli(argv):
     args = parse_args(argv)
 
-    setup_logging(args.verbose, args.log if hasattr(args, "log") else None)
+    setup_logging(args.verbose, None if args.whatif else args.log)
 
     # Validation sequence
     validate_python_version()
@@ -95,6 +95,11 @@ def _apply_operations_dir(args):
 
 def _upload_cli(args):
     """Execute the upload command (default)."""
+    if args.reimport:
+        from enex2notion.cli_reimport import reimport_command
+
+        reimport_command(args)
+        return
     rules = Rules.from_args(args)
     
     # Apply operations-dir defaults
