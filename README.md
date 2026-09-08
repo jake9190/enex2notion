@@ -235,6 +235,12 @@ append responses containing existing siblings are filtered to new blocks only.
 Omitted heading `is_toggleable` and explicit `false` compare equally; `true`
 remains a meaningful difference.
 
+Child content under blocks that cannot contain children in Notion (including
+non-toggle headings, code, and media blocks) is emitted immediately afterward
+as sibling blocks. Content and reading order are preserved, but the unsupported
+nesting is removed. Supported containers keep their children. Preview and actual
+uploads use the same conversion.
+
 Some older recovery records may include original sibling IDs in `new_root_ids`.
 Always compare that list with `original.blocks` and exclude all original IDs
 before considering any block for removal. Do not bulk-delete blocks based only

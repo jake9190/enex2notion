@@ -213,7 +213,14 @@ def _convert_note_blocks(note_blocks):
         converted_blocks = converted if isinstance(converted, list) else [converted]
         if block.__class__.__name__ != "NotionTableBlock" and block.children:
             parent = converted_blocks[-1]
-            parent[parent["type"]].setdefault("children", []).extend(_convert_note_blocks(block.children))
+            parent_type = parent["type"]
+            child_blocks = _convert_note_blocks(block.children)
+            if parent_type in {"paragraph", "bulleted_list_item", "numbered_list_item", "to_do", "toggle", "quote", "callout"} or (
+                parent_type in {"heading_1", "heading_2", "heading_3"} and parent[parent_type].get("is_toggleable")
+            ):
+                parent[parent_type].setdefault("children", []).extend(child_blocks)
+            else:
+                converted_blocks.extend(child_blocks)
         api_blocks.extend(converted_blocks)
     return api_blocks
 
@@ -261,9 +268,14 @@ def _upload_block_tree(wrapper, parent_id, api_blocks, uploaded_roots=None, afte
         uploaded_blocks.extend(result)
         if after is not None:
             after = result[-1]["id"]
-        for uploaded_block, child_blocks in zip(result, children):
+        for source_block, uploaded_block, child_blocks in zip(batch, result, children):
             if child_blocks:
-                _upload_block_tree(wrapper, uploaded_block["id"], child_blocks)
+                try:
+                    _upload_block_tree(wrapper, uploaded_block["id"], child_blocks)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"Cannot append children to {source_block['type']} block {uploaded_block['id']}: {error}"
+                    ) from error
     return uploaded_blocks
 
 

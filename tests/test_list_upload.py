@@ -6,6 +6,7 @@ import pytest
 from enex2notion.enex_types import EvernoteNote
 from enex2notion.enex_uploader import _convert_note_blocks, _process_image_blocks, _upload_block_tree, _upload_note
 from enex2notion.note_parser.blocks import parse_note_blocks
+from enex2notion.notion_blocks.text import NotionTextBlock, TextProp
 from enex2notion.notion_blocks.uploadable import NotionImageBlock
 
 
@@ -116,7 +117,7 @@ def test_nested_upload_failure_marks_partial_import(parse_html):
 
     assert result[0] == "page"
     assert result[1] is True
-    assert "Failed to upload blocks: invalid child" in result[2]
+    assert any("bulleted_list_item block parent: invalid child" in error for error in result[2])
     assert wrapper.append_blocks.call_count == 2
 
 
@@ -133,6 +134,78 @@ def test_upload_table_keeps_inline_rows(parse_html):
     table = wrapper.append_blocks.call_args.kwargs["children"][0]["table"]
     assert table["children"][0]["type"] == "table_row"
     assert table["children"][0]["table_row"]["cells"][0][0]["text"]["content"] == "cell"
+
+
+@pytest.mark.parametrize("block_type", [
+    "heading_1", "heading_2", "heading_3", "code", "image", "pdf", "file", "audio", "video", "bookmark", "divider",
+])
+def test_leaf_block_children_are_preserved_as_following_siblings(mocker, block_type):
+    parent = NotionTextBlock(text_prop=TextProp("Parent"))
+    parent.children.append(NotionTextBlock(text_prop=TextProp("Child")))
+    sibling = NotionTextBlock(text_prop=TextProp("After"))
+    parent_payload = {"type": block_type, block_type: {}}
+    child_payload = {"type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": "Child"}}]}}
+    sibling_payload = {"type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": "After"}}]}}
+    mocker.patch("enex2notion.enex_uploader.convert_block_to_api_format", side_effect=[
+        parent_payload, child_payload, sibling_payload,
+    ])
+
+    converted = _convert_note_blocks([parent, sibling])
+
+    assert converted == [parent_payload, child_payload, sibling_payload]
+    assert "children" not in converted[0][block_type]
+    assert len(parent.children) == 1
+
+
+@pytest.mark.parametrize("level", [1, 2, 3])
+def test_parsed_heading_children_upload_as_siblings(parse_html, level):
+    parent = parse_note_blocks(parse_html(f"<h{level}>Heading</h{level}>"))[0]
+    parent.children.append(NotionTextBlock(text_prop=TextProp("Child")))
+    blocks = _convert_note_blocks([parent])
+    wrapper = Mock()
+    wrapper.append_blocks.return_value = [{"id": "heading"}, {"id": "child"}]
+
+    _upload_block_tree(wrapper, "page", blocks)
+
+    wrapper.append_blocks.assert_called_once()
+    call = wrapper.append_blocks.call_args
+    assert call.kwargs["block_id"] == "page"
+    assert [block["type"] for block in call.kwargs["children"]] == [f"heading_{level}", "paragraph"]
+    assert all("children" not in block[block["type"]] for block in call.kwargs["children"])
+    assert call.kwargs["children"][1]["paragraph"]["rich_text"][0]["text"]["content"] == "Child"
+
+
+@pytest.mark.parametrize("block_type", [
+    "paragraph", "bulleted_list_item", "numbered_list_item", "to_do", "toggle", "quote", "callout",
+    "heading_1", "heading_2", "heading_3",
+])
+def test_supported_containers_keep_children(mocker, block_type):
+    parent = NotionTextBlock(text_prop=TextProp("Parent"))
+    parent.children.append(NotionTextBlock(text_prop=TextProp("Child")))
+    data = {"is_toggleable": True} if block_type.startswith("heading_") else {}
+    parent_payload = {"type": block_type, block_type: data}
+    child_payload = {"type": "paragraph", "paragraph": {"rich_text": []}}
+    mocker.patch("enex2notion.enex_uploader.convert_block_to_api_format", side_effect=[parent_payload, child_payload])
+
+    converted = _convert_note_blocks([parent])
+
+    assert len(converted) == 1
+    assert converted[0][block_type]["children"] == [child_payload]
+
+
+def test_promoted_heading_children_stay_inside_surrounding_list(parse_html):
+    parent = parse_note_blocks(parse_html("<ul><li>List</li></ul>"))[0]
+    heading = parse_note_blocks(parse_html("<h1>Heading</h1>"))[0]
+    heading.children.append(NotionTextBlock(text_prop=TextProp("Child")))
+    parent.children.append(heading)
+    blocks = _convert_note_blocks([parent])
+    wrapper = Mock()
+    wrapper.append_blocks.side_effect = [[{"id": "list"}], [{"id": "heading"}, {"id": "child"}]]
+
+    _upload_block_tree(wrapper, "page", blocks)
+
+    assert [call.kwargs["block_id"] for call in wrapper.append_blocks.call_args_list] == ["page", "list"]
+    assert [block["type"] for block in wrapper.append_blocks.call_args.kwargs["children"]] == ["heading_1", "paragraph"]
 
 
 def test_inserted_batches_advance_anchor(parse_html):

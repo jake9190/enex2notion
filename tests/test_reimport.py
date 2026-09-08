@@ -304,6 +304,33 @@ def test_replacement_keeps_page_id_and_archives_only_after_upload(importer, mock
     assert journal["original"]["blocks"][0]["id"] == "old"
 
 
+def test_reimport_preserves_promoted_children_and_preview_counts(importer, mocker, parse_html):
+    from enex2notion.note_parser.blocks import parse_note_blocks
+
+    parent = parse_note_blocks(parse_html("<h1>Heading</h1>"))[0]
+    parent.children.append(NotionTextBlock(text_prop=TextProp("Child")))
+    mocker.patch("enex2notion.cli_reimport.parse_note", return_value=([parent], []))
+    plan = make_plan(importer)
+    assert [block["type"] for block in plan["proposed"]] == ["heading_1", "paragraph"]
+    original = make_snapshot()
+    added = [
+        {**copy.deepcopy(block), "id": f"new-{index}", "last_edited_time": "2026-09-01T00:00:00Z"}
+        for index, block in enumerate(plan["proposed"])
+    ]
+    staged = copy.deepcopy(original)
+    staged["blocks"].extend(added)
+    completed = copy.deepcopy(original)
+    completed["blocks"] = added
+    importer.remote.snapshot.side_effect = [original, original, staged, completed]
+    importer.wrapper.append_blocks.return_value = added
+
+    importer.execute(plan)
+
+    importer.wrapper.append_blocks.assert_called_once()
+    assert importer.wrapper.append_blocks.call_args.kwargs["children"] == plan["proposed"]
+    importer.remote.archive.assert_called_once_with("old")
+
+
 def test_upload_failure_leaves_original_blocks_and_no_baseline(importer, mocker, tmp_path):
     plan = make_plan(importer)
     configure_success(importer, mocker)
