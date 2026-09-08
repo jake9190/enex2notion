@@ -1,8 +1,11 @@
 import copy
 import difflib
 import json
+import re
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from enex2notion.cli_notion import get_notion_wrapper
@@ -14,7 +17,45 @@ from enex2notion.import_state import (
 from enex2notion.note_parser.note import parse_note
 from enex2notion.notion_api_wrapper import note_to_database_properties
 from enex2notion.notion_blocks.uploadable import NotionUploadableBlock
+from enex2notion.reimport_attachments import FILE_TYPES, match_unchanged_blocks, walk_payload
 from enex2notion.utils_static import Rules
+
+
+def comparison_url(url):
+    if not isinstance(url, str):
+        return url
+    unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+
+    def normalize(component, allowed):
+        return re.sub(
+            r"%[0-9a-fA-F]{2}",
+            lambda match: chr(int(match[0][1:], 16)) if chr(int(match[0][1:], 16)) in allowed else match[0].upper(),
+            component,
+        )
+
+    try:
+        parts = urlsplit(url)
+        return urlunsplit((
+            parts.scheme, parts.netloc, normalize(parts.path, unreserved),
+            normalize(parts.query, unreserved), normalize(parts.fragment, unreserved + "'"),
+        ))
+    except ValueError:
+        return url
+
+
+def comparison_date(value):
+    result = dict(value)
+    for key in ("start", "end"):
+        text = result.get(key)
+        if not isinstance(text, str) or "T" not in text:
+            continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo:
+                result[key] = parsed.astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+    return result
 
 
 def canonical(value):
@@ -33,6 +74,10 @@ def canonical(value):
         if key == "file_upload":
             result[key] = item
             continue
+        if key == "url":
+            item = comparison_url(item)
+        elif key == "date" and isinstance(item, dict):
+            item = comparison_date(item)
         cleaned = canonical(item)
         if cleaned in (None, [], {}) or (key == "color" and cleaned == "default"):
             continue
@@ -50,6 +95,22 @@ def old_payload(blocks):
         if block.get("_children"):
             data["children"] = old_payload(block["_children"])
         result.append({"type": block_type, block_type: data})
+    return result
+
+
+def display_payload(value):
+    if isinstance(value, list):
+        return [display_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {key: display_payload(item) for key, item in value.items()}
+    file_data = result.get("file")
+    if isinstance(file_data, dict) and isinstance(file_data.get("url"), str):
+        try:
+            parts = urlsplit(file_data["url"])
+            file_data["url"] = urlunsplit(parts._replace(query="", fragment=""))
+        except ValueError:
+            file_data["url"] = "[unavailable hosted file URL]"
     return result
 
 
@@ -124,6 +185,7 @@ class Reimporter:
         self.state = ImportState(directory)
         self.output = output
         self.importer_id = None
+        self.attachment_digests = {}
 
     def plan(self, note, notebook_id, pages, schema):
         record = self.state.get(notebook_id, note)
@@ -175,12 +237,26 @@ class Reimporter:
         if not proposed:
             return {"action": "skip", "reason": "ENEX conversion produced no uploadable blocks"}
         properties = proposed_properties(note, schema)
-        before = canonical({"blocks": old_payload(snapshot["blocks"]), "properties": property_projection(snapshot["page"], properties)})
-        after = canonical({"blocks": proposed, "properties": properties})
+        original_payload = old_payload(snapshot["blocks"])
+        retained = match_unchanged_blocks(
+            snapshot["blocks"], original_payload, proposed, note.resources, canonical, self.attachment_digests,
+        )
+        compared_proposed = [
+            old_payload([retained[index]])[0] if index in retained else block
+            for index, block in enumerate(proposed)
+        ]
+        original_properties = property_projection(snapshot["page"], properties)
+        property_changes = {
+            name: value for name, value in properties.items()
+            if canonical(value) != canonical(original_properties.get(name))
+        }
+        before = canonical({"blocks": original_payload, "properties": original_properties})
+        after = canonical({"blocks": compared_proposed, "properties": properties})
         return {
             "action": "unchanged" if before == after else "replace",
             "editor_fallback": editor_fallback,
-            "snapshot": snapshot, "blocks": blocks, "properties": properties,
+            "snapshot": snapshot, "blocks": blocks, "properties": property_changes,
+            "retained": retained, "proposed": proposed,
             "before": before, "after": after, "note": note, "notebook_id": notebook_id,
         }
 
@@ -190,11 +266,27 @@ class Reimporter:
             self.output("  Allowed by last-editor fallback: the integration last edited the page and all blocks; earlier human edits cannot be ruled out.")
         if plan["action"] != "replace":
             return
-        self.output(f"  Page: {plan['snapshot']['page']['id']}; replace {len(plan['snapshot']['blocks'])} existing top-level blocks")
+        kept = len(plan["retained"])
+        files_kept = sum(
+            block["type"] in FILE_TYPES
+            for root in plan["retained"].values() for block in walk_payload(old_payload([root]))
+        )
+        files_uploaded = sum(
+            block["type"] in FILE_TYPES and "file_upload" in block[block["type"]]
+            for index, root in enumerate(plan["proposed"]) if index not in plan["retained"]
+            for block in walk_payload([root])
+        )
+        self.output(
+            f"  Page: {plan['snapshot']['page']['id']}; keep {kept}, "
+            f"archive {len(plan['snapshot']['blocks']) - kept}, "
+            f"insert {len(plan['proposed']) - kept} top-level blocks; "
+            f"keep {files_kept} file/image blocks, upload {files_uploaded} attachments"
+        )
         self.output("  ENEX file_upload references are planned attachment uploads, not Notion upload IDs.")
+        self.output("  Hosted-file URL query strings are omitted from this diff.")
         for line in difflib.unified_diff(
-            json.dumps(plan["before"], indent=2, ensure_ascii=True).splitlines(),
-            json.dumps(plan["after"], indent=2, ensure_ascii=True).splitlines(),
+            json.dumps(display_payload(plan["before"]), indent=2, ensure_ascii=True).splitlines(),
+            json.dumps(display_payload(plan["after"]), indent=2, ensure_ascii=True).splitlines(),
             fromfile="Notion", tofile="ENEX replacement", lineterm="",
         ):
             self.output(line)
@@ -208,8 +300,19 @@ class Reimporter:
             raise RuntimeError("Page changed after planning; no content replaced")
         journal_path = self.directory / "reimport-backups" / f"{page_id}-{uuid4().hex}.json"
         journal = {"status": "prepared", "original": snapshot, "new_root_ids": [], "archived_ids": []}
+        retained_ids = {block["id"] for block in plan["retained"].values()}
+        journal["retained_ids"] = sorted(retained_ids)
         write_json(journal_path, journal)
-        blocks = copy.deepcopy(plan["blocks"])
+        blocks = []
+        source_ranges = []
+        position = 0
+        for source in plan["blocks"]:
+            count = len(preview_blocks([source]))
+            indices = list(range(position, position + count))
+            if any(index not in plan["retained"] for index in indices):
+                blocks.append(copy.deepcopy(source))
+                source_ranges.append(indices)
+            position += count
         warnings = _process_image_blocks(blocks, self.wrapper, notebook_name="reimport", note_title=plan["note"].title)
         if warnings:
             raise RuntimeError("Attachment upload warnings; original note preserved: " + "; ".join(warnings))
@@ -221,14 +324,35 @@ class Reimporter:
                 validate_files(block.children)
 
         validate_files(blocks)
-        payload = _convert_note_blocks(blocks)
-        if not payload:
-            raise RuntimeError("Conversion produced no replacement blocks; original note preserved")
+        additions = {}
+        for source, indices in zip(blocks, source_ranges):
+            converted = _convert_note_blocks([source])
+            if len(converted) != len(indices):
+                raise RuntimeError("Conversion changed after planning; original note preserved")
+            additions.update({index: block for index, block in zip(indices, converted) if index not in plan["retained"]})
         if edit_signature(self.remote.snapshot(page_id)) != edit_signature(snapshot):
             raise RuntimeError("Page changed during attachment preparation; no content replaced")
         new_roots = []
         try:
-            _upload_block_tree(self.wrapper, page_id, payload, uploaded_roots=new_roots)
+            pending = []
+            anchor = snapshot["blocks"][0]["id"] if retained_ids and snapshot["blocks"] else None
+
+            def insert_pending():
+                nonlocal anchor
+                if pending:
+                    uploaded = _upload_block_tree(
+                        self.wrapper, page_id, pending, uploaded_roots=new_roots, after=anchor,
+                    )
+                    anchor = uploaded[-1]["id"]
+                    pending.clear()
+
+            for index in range(len(plan["proposed"])):
+                if index in plan["retained"]:
+                    insert_pending()
+                    anchor = plan["retained"][index]["id"]
+                else:
+                    pending.append(additions[index])
+            insert_pending()
             journal["new_root_ids"] = [block["id"] for block in new_roots]
             journal["status"] = "replacement_uploaded"
             write_json(journal_path, journal)
@@ -241,10 +365,13 @@ class Reimporter:
                 if canonical(current["page"].get(field)) != canonical(snapshot["page"].get(field)):
                     raise RuntimeError("Page metadata changed during upload; old blocks were not archived")
             for block in snapshot["blocks"]:
+                if block["id"] in retained_ids:
+                    continue
                 self.remote.archive(block["id"])
                 journal["archived_ids"].append(block["id"])
                 write_json(journal_path, journal)
-            self.remote.update_properties(page_id, plan["properties"])
+            if plan["properties"]:
+                self.remote.update_properties(page_id, plan["properties"])
             self.state.record(plan["notebook_id"], plan["note"], self.remote.snapshot(page_id))
             journal["status"] = "complete"
             write_json(journal_path, journal)

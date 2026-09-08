@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from enex2notion.import_state import ImportRemote, edit_signature, latest_edit
 from enex2notion.notion_blocks.text import NotionTextBlock, TextProp
 from enex2notion.notion_blocks.uploadable import NotionAudioBlock, NotionImageBlock, NotionVideoBlock
 from enex2notion.utils_static import Rules
+from enex2notion.reimport_attachments import hosted_digest
 
 
 def test_reimport_options():
@@ -172,6 +174,27 @@ def test_canonical_attachment_reference_keeps_identity():
     }
 
 
+def test_equivalent_url_and_date_representations_compare_equal():
+    before = {
+        "URL": {"url": "https://example.com/path#:~:text=dogs%20who%27ve"},
+        "Created": {"date": {"start": "2026-02-26T21:32:00.000+00:00", "end": None, "time_zone": None}},
+    }
+    after = {
+        "URL": {"url": "https://example.com/path#:~:text=dogs%20who've"},
+        "Created": {"date": {"start": "2026-02-26T16:32:00-05:00"}},
+    }
+    assert canonical(before) == canonical(after)
+
+
+def test_real_date_and_reserved_url_differences_are_preserved():
+    assert canonical({"date": {"start": "2026-02-26T21:32:00Z"}}) != canonical(
+        {"date": {"start": "2026-02-26T21:32:10Z"}}
+    )
+    assert canonical({"url": "https://example.com/a%2Fb?x=a%26b"}) != canonical(
+        {"url": "https://example.com/a/b?x=a&b"}
+    )
+
+
 def configure_success(importer, mocker):
     original = make_snapshot()
     completed = make_snapshot(text="Replacement", edited="2026-09-02T00:00:00Z")
@@ -197,7 +220,7 @@ def test_replacement_keeps_page_id_and_archives_only_after_upload(importer, mock
     importer.execute(plan)
     assert importer.wrapper.append_blocks.call_args.kwargs["block_id"] == "page"
     importer.wrapper.create_page.assert_not_called()
-    importer.remote.update_properties.assert_called_once_with("page", plan["properties"])
+    importer.remote.update_properties.assert_not_called()
     record = importer.state.get("notebook", make_note())
     assert record["page_id"] == "page"
     journal = json.loads(next((tmp_path / "reimport-backups").glob("*.json")).read_text())
@@ -245,7 +268,7 @@ def test_database_properties_leave_custom_fields_alone(importer):
         "Workflow": {"type": "multi_select"}, "Review date": {"type": "date"},
     }
     plan = importer.plan(make_note(), "notebook", [make_snapshot()["page"]], schema)
-    assert set(plan["properties"]) == {"Name", "Tags", "URL"}
+    assert set(plan["properties"]) == {"Name"}
 
 
 def test_command_whatif_limit_is_global_and_read_only(tmp_path, mocker, capsys):
@@ -440,3 +463,157 @@ def test_explicit_notebook_id_remains_root_scoped(tmp_path, mocker, capsys, pare
         assert "1 would replace" in output
     assert wrapper.mock_calls == []
     assert list(tmp_path.iterdir()) == []
+
+
+def attachment_note_and_snapshot(kind="pdf", mime="application/pdf", suffix="<div>Replacement</div>"):
+    data = b"verified file bytes"
+    digest = hashlib.md5(data).hexdigest()
+    resource = EvernoteResource(data, len(data), digest, mime, "file.bin")
+    note = make_note(content=f'<en-media type="{mime}" hash="{digest}"/>{suffix}')
+    note.resources = [resource]
+    snapshot = make_snapshot()
+    snapshot["blocks"].insert(0, {
+        "id": "file-block", "type": kind, "last_edited_time": "2026-09-01T00:00:00Z",
+        kind: {"type": "file", "file": {"url": "https://prod-files-secure.s3.us-west-2.amazonaws.com/file.bin?signature=temporary"}},
+    })
+    return note, snapshot, (len(data), hashlib.sha256(data).hexdigest())
+
+
+@pytest.mark.parametrize("kind,mime", [
+    ("pdf", "application/pdf"), ("image", "image/png"), ("audio", "audio/mpeg"),
+    ("video", "video/mp4"), ("file", "application/octet-stream"),
+])
+def test_verified_files_are_retained_beside_changed_text(importer, mocker, kind, mime):
+    note, snapshot, digest = attachment_note_and_snapshot(kind, mime)
+    importer.remote.snapshot.return_value = snapshot
+    download = mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=digest)
+    plan = make_plan(importer, note)
+    assert plan["action"] == "replace"
+    assert plan["retained"] == {0: snapshot["blocks"][0]}
+    assert plan["before"]["blocks"][0] == plan["after"]["blocks"][0]
+    importer.display("Note", plan)
+    assert any("upload 0 attachments" in call.args[0] for call in importer.output.call_args_list)
+    make_plan(importer, note)
+    download.assert_called_once()
+    assert importer.wrapper.mock_calls == []
+
+
+def test_file_only_note_is_unchanged_after_verification(importer, mocker):
+    note, snapshot, digest = attachment_note_and_snapshot(suffix="")
+    snapshot["blocks"].pop()
+    importer.remote.snapshot.return_value = snapshot
+    mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=digest)
+    assert make_plan(importer, note)["action"] == "unchanged"
+
+
+@pytest.mark.parametrize("verified", [None, (19, "different-content")])
+def test_same_filename_does_not_prove_file_identity(importer, mocker, verified):
+    note, snapshot, _ = attachment_note_and_snapshot()
+    importer.remote.snapshot.return_value = snapshot
+    mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=verified)
+    plan = make_plan(importer, note)
+    assert plan["retained"] == {}
+    assert "file_upload" in plan["after"]["blocks"][0]["pdf"]
+    importer.display("Note", plan)
+    rendered = "\n".join(call.args[0] for call in importer.output.call_args_list)
+    assert "signature=temporary" not in rendered
+    assert "signature=temporary" in plan["snapshot"]["blocks"][0]["pdf"]["file"]["url"]
+
+
+def test_execution_never_uploads_or_archives_retained_file(importer, mocker):
+    note, original, digest = attachment_note_and_snapshot()
+    importer.remote.snapshot.return_value = original
+    mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=digest)
+    plan = make_plan(importer, note)
+    new = make_snapshot(text="Replacement", edited="2026-09-02T00:00:00Z")["blocks"][0]
+    new["id"] = "new"
+    staged = copy.deepcopy(original)
+    staged["blocks"].insert(1, new)
+    completed = copy.deepcopy(staged)
+    completed["blocks"].pop()
+    importer.remote.snapshot.side_effect = [original, original, staged, completed]
+    files = mocker.patch("enex2notion.cli_reimport._process_image_blocks", return_value=[])
+    importer.wrapper.append_blocks.return_value = [{"id": "new"}]
+
+    importer.execute(plan)
+
+    assert all(isinstance(block, NotionTextBlock) for block in files.call_args.args[0])
+    importer.remote.archive.assert_called_once_with("old")
+    assert importer.wrapper.append_blocks.call_args.kwargs["after"] == "file-block"
+    assert importer.wrapper.append_blocks.call_args.kwargs["children"][0]["type"] == "paragraph"
+    importer.remote.update_properties.assert_not_called()
+
+
+def test_metadata_only_change_does_not_recreate_files(importer, mocker):
+    note, snapshot, digest = attachment_note_and_snapshot(suffix="")
+    snapshot["blocks"].pop()
+    snapshot["page"]["properties"]["Updated"] = {"date": {"start": "2026-01-01T00:00:00Z"}}
+    importer.remote.snapshot.return_value = snapshot
+    mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=digest)
+    plan = importer.plan(note, "notebook", [snapshot["page"]], {"title": {"type": "title"}, "Updated": {"type": "date"}})
+    assert set(plan["properties"]) == {"Updated"}
+    assert plan["retained"] == {0: snapshot["blocks"][0]}
+    files = mocker.patch("enex2notion.cli_reimport._process_image_blocks", return_value=[])
+    importer.execute(plan)
+    assert files.call_args.args[0] == []
+    importer.wrapper.append_blocks.assert_not_called()
+    importer.remote.archive.assert_not_called()
+    importer.remote.update_properties.assert_called_once_with("page", plan["properties"])
+
+
+def test_changed_prefix_is_inserted_before_retained_file(importer, mocker):
+    note, original, digest = attachment_note_and_snapshot(suffix="")
+    note.content = note.content.replace("<en-note>", "<en-note><div>Replacement</div>")
+    original["blocks"].reverse()
+    importer.remote.snapshot.return_value = original
+    mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=digest)
+    plan = make_plan(importer, note)
+    assert plan["retained"] == {1: original["blocks"][1]}
+    new = make_snapshot(text="Replacement")["blocks"][0]
+    new["id"] = "new"
+    staged = copy.deepcopy(original)
+    staged["blocks"].insert(1, new)
+    completed = copy.deepcopy(staged)
+    completed["blocks"].pop(0)
+    importer.remote.snapshot.side_effect = [original, original, staged, completed]
+    mocker.patch("enex2notion.cli_reimport._process_image_blocks", return_value=[])
+    importer.wrapper.append_blocks.return_value = [{"id": "new"}]
+    importer.execute(plan)
+    assert importer.wrapper.append_blocks.call_args.kwargs["after"] == "old"
+    importer.remote.archive.assert_called_once_with("old")
+
+
+def test_nested_file_retained_when_entire_parent_is_unchanged(importer, mocker):
+    note, snapshot, digest = attachment_note_and_snapshot(suffix="")
+    note.content = note.content.replace("<en-note>", "<en-note><ul><li>Parent").replace("</en-note>", "</li></ul></en-note>")
+    snapshot["blocks"] = [{
+        "id": "list", "last_edited_time": "2026-09-01T00:00:00Z", "type": "bulleted_list_item",
+        "bulleted_list_item": {"rich_text": [{"type": "text", "text": {"content": "Parent"}}]},
+        "_children": [snapshot["blocks"][0]],
+    }]
+    importer.remote.snapshot.return_value = snapshot
+    mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=digest)
+    assert make_plan(importer, note)["action"] == "unchanged"
+    note.content = note.content.replace("Parent", "Changed parent")
+    plan = make_plan(importer, note)
+    assert plan["retained"] == {}
+    assert "file_upload" in plan["after"]["blocks"][0]["bulleted_list_item"]["children"][0]["pdf"]
+
+
+def test_hosted_file_verification_is_bounded_and_unauthenticated(mocker):
+    response = mocker.Mock()
+    response.status_code = 200
+    response.iter_content.return_value = [b"abc", b"def"]
+    context = mocker.MagicMock()
+    context.__enter__.return_value = response
+    get = mocker.patch("enex2notion.reimport_attachments.requests.get", return_value=context)
+    url = "https://prod-files-secure.s3.us-west-2.amazonaws.com/file"
+    assert hosted_digest(url, 6) == (6, hashlib.sha256(b"abcdef").hexdigest())
+    assert "headers" not in get.call_args.kwargs and "auth" not in get.call_args.kwargs
+    assert get.call_args.kwargs["allow_redirects"] is False
+    assert hosted_digest(url, 5) is None
+    response.status_code = 403
+    assert hosted_digest(url, 6) is None
+    get.reset_mock()
+    assert hosted_digest("https://untrusted.example/file", 6) is None
+    get.assert_not_called()

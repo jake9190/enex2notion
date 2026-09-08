@@ -212,10 +212,11 @@ def _convert_note_blocks(note_blocks):
     return api_blocks
 
 
-def _append_block_batch(wrapper, block_id, batch):
+def _append_block_batch(wrapper, block_id, batch, after=None):
     for attempt in range(3):
         try:
-            return wrapper.append_blocks(block_id=block_id, children=batch)
+            options = {"after": after} if after is not None else {}
+            return wrapper.append_blocks(block_id=block_id, children=batch, **options)
         except Exception as batch_error:
             error_msg = str(batch_error).lower()
             is_transient = any(message in error_msg for message in [
@@ -229,7 +230,7 @@ def _append_block_batch(wrapper, block_id, batch):
             time.sleep((2 ** attempt) * 0.5)
 
 
-def _upload_block_tree(wrapper, parent_id, api_blocks, uploaded_roots=None):
+def _upload_block_tree(wrapper, parent_id, api_blocks, uploaded_roots=None, after=None):
     """Append each level separately; tables must retain their initial row payload."""
     uploaded_blocks = []
     for start_idx in range(0, len(api_blocks), 100):
@@ -242,12 +243,14 @@ def _upload_block_tree(wrapper, parent_id, api_blocks, uploaded_roots=None):
             children.append(block_data.pop("children", []) if block_type != "table" else [])
             payload.append({**block, block_type: block_data})
 
-        result = _append_block_batch(wrapper, parent_id, payload)
+        result = _append_block_batch(wrapper, parent_id, payload, after=after)
         if len(result) != len(batch):
             raise RuntimeError("Notion returned an unexpected number of uploaded blocks")
         uploaded_blocks.extend(result)
         if uploaded_roots is not None:
             uploaded_roots.extend(result)
+        if after is not None:
+            after = result[-1]["id"]
         for uploaded_block, child_blocks in zip(result, children):
             if child_blocks:
                 _upload_block_tree(wrapper, uploaded_block["id"], child_blocks)

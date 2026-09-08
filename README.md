@@ -110,9 +110,11 @@ $ enex2notion
 
 ### Re-import Existing Notes
 
-Re-import replaces note content in the **same Notion page**, retaining its page ID
-and page links. It does not merge edits. Existing blocks are archived and replaced,
-so links to individual old blocks and their comments are not transferred.
+Re-import updates note content in the **same Notion page**, retaining its page ID
+and page links. It does not merge edits. Unchanged top-level blocks (including
+their unchanged children) stay in place. Changed blocks are archived and replaced,
+so links and comments on replaced blocks are not transferred; retained blocks
+keep their IDs.
 
 Start with a read-only preview of at most five selected notes:
 
@@ -125,8 +127,25 @@ formatting, nesting, and imported metadata. The limit is global across input fil
 and counts skipped and unchanged notes too. `--note TITLE` and `--note-index N`
 still filter the source notes. Preview requires Notion read access but makes no
 Notion writes, attachment uploads, log writes, or operational-file changes.
-Attachment placeholders identify the ENEX hash and filename; actual updates
-re-upload attachments and are subject to Notion's upload validation.
+To verify attachments, preview and real updates may download current Notion-hosted
+files and compare their size and SHA-256 digest with the ENEX bytes. Matching
+filenames alone are not trusted. Downloads are size-bounded, do not forward the
+integration token, and do not follow redirects. Verified unchanged file/photo
+blocks remain in Notion without reuploading, including those inside unchanged
+top-level subtrees. The preview reports how many blocks and attachments it will
+keep, archive, insert, or upload. Temporary hosted-file URL query strings are
+omitted from displayed diffs.
+
+Files in changed parent subtrees, files that need repositioning which cannot be
+achieved around retained blocks, and files whose bytes cannot be verified may
+still need uploading. Expired/inaccessible URLs or transformed image bytes can
+prevent verification. Preview shows these as `file_upload` placeholders identifying
+the ENEX hash and filename; actual uploads remain subject to Notion validation.
+
+Equivalent timezone/millisecond date representations and equivalent URL escapes
+are ignored when comparing values. Only changed metadata fields are written.
+Real date differences are preserved: `21:32:00` and `21:32:10` differ by ten seconds
+and are not treated as equivalent. Reserved URL separators are not decoded.
 
 Apply replacements, protecting notes edited after a cutoff:
 
@@ -180,11 +199,13 @@ pages containing child pages/databases or synced/unsupported blocks are skipped.
 Re-import does not create missing notes or use done-file hashes to skip updates.
 Keep source titles and creation timestamps stable to reuse recorded identities.
 Unrelated database properties, page icons, and covers are left alone; standard
-imported title, Created, Updated, URL, Tags, and Partial Import fields are updated.
+imported title, Created, Updated, URL, Tags, and Partial Import fields are updated
+only when their values differ.
 
 Before replacing content, the importer writes a JSON recovery record under
 `operations/reimport-backups/`, uploads new blocks, rechecks the original content,
-then archives old blocks. Failed requests stop the run and leave an incomplete
+then archives only the replaced blocks. Retained block IDs are included in the
+record. Failed requests stop the run and leave an incomplete
 record that blocks automatic retries for that page. These records contain note
 content and should be protected like the ENEX files. They are recovery records,
 not self-contained attachment backups; Notion-hosted file URLs may expire.

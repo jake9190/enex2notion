@@ -315,7 +315,7 @@ class NotionAPIWrapper:
         return result
 
     def append_blocks(
-        self, block_id: str, children: list[dict[str, Any]], max_batch: int = 100
+        self, block_id: str, children: list[dict[str, Any]], max_batch: int = 100, after: str | None = None
     ) -> list[dict[str, Any]]:
         """Append blocks to a page/block.
 
@@ -337,10 +337,13 @@ class NotionAPIWrapper:
             time.sleep(self._rate_limit_delay)
 
             try:
+                options = {"after": after} if after is not None else {}
                 response = self._retry_on_rate_limit(
-                    self.client.blocks.children.append, block_id=block_id, children=batch
+                    self.client.blocks.children.append, block_id=block_id, children=batch, **options
                 )
                 created_blocks.extend(response.get("results", []))
+                if after is not None:
+                    after = response["results"][-1]["id"]
                 logger.debug(f"Appended {len(batch)} blocks to {block_id}")
             except APIResponseError as e:
                 # Rate limit errors are already handled in _retry_on_rate_limit

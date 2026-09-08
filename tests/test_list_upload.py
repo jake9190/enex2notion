@@ -132,3 +132,18 @@ def test_upload_table_keeps_inline_rows(parse_html):
     table = wrapper.append_blocks.call_args.kwargs["children"][0]["table"]
     assert table["children"][0]["type"] == "table_row"
     assert table["children"][0]["table_row"]["cells"][0][0]["text"]["content"] == "cell"
+
+
+def test_inserted_batches_advance_anchor(parse_html):
+    blocks = _convert_note_blocks(parse_note_blocks(parse_html(
+        "".join(f"<div>{index}</div>" for index in range(205))
+    )))
+    wrapper = Mock()
+    wrapper.append_blocks.side_effect = lambda **kwargs: [
+        {"id": block["paragraph"]["rich_text"][0]["text"]["content"]}
+        for block in kwargs["children"]
+    ]
+    _upload_block_tree(wrapper, "page", blocks, after="retained")
+    assert [call.kwargs["after"] for call in wrapper.append_blocks.call_args_list] == [
+        "retained", "99", "199",
+    ]
