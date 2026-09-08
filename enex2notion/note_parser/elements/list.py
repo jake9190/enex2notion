@@ -80,12 +80,21 @@ def _extract_nested_lists(element: Tag):
     Must be called BEFORE extracting text to avoid duplicate content.
     """
     nested_blocks = []
-    # Find direct child lists (not deeply nested)
-    for nested_list in element.find_all(["ul", "ol"], recursive=False):
+    nested_lists = [
+        nested_list
+        for nested_list in element.find_all(["ul", "ol"])
+        if nested_list.find_parent(["li", "ul", "ol"]) is element
+    ]
+    for nested_list in nested_lists:
         # Parse the nested list
         nested_blocks.extend(parse_list(nested_list))
         # Remove it from the element so it doesn't appear in text extraction
+        wrapper = nested_list.parent
         nested_list.extract()
+        while wrapper is not element and not wrapper.contents:
+            parent = wrapper.parent
+            wrapper.extract()
+            wrapper = parent
     return nested_blocks
 
 

@@ -198,6 +198,60 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
     return all_warnings
 
 
+def _convert_note_blocks(note_blocks):
+    api_blocks = []
+    for block in note_blocks:
+        converted = convert_block_to_api_format(block)
+        if not converted:
+            continue
+        converted_blocks = converted if isinstance(converted, list) else [converted]
+        if block.__class__.__name__ != "NotionTableBlock" and block.children:
+            parent = converted_blocks[-1]
+            parent[parent["type"]]["children"] = _convert_note_blocks(block.children)
+        api_blocks.extend(converted_blocks)
+    return api_blocks
+
+
+def _append_block_batch(wrapper, block_id, batch):
+    for attempt in range(3):
+        try:
+            return wrapper.append_blocks(block_id=block_id, children=batch)
+        except Exception as batch_error:
+            error_msg = str(batch_error).lower()
+            is_transient = any(message in error_msg for message in [
+                "timeout", "connection", "rate limit", "429", "503", "502", "500"
+            ])
+            if not is_transient or attempt == 2:
+                raise
+            logger.warning(
+                f"Transient error uploading block batch (attempt {attempt + 1}/3): {batch_error}"
+            )
+            time.sleep((2 ** attempt) * 0.5)
+
+
+def _upload_block_tree(wrapper, parent_id, api_blocks):
+    """Append each level separately; tables must retain their initial row payload."""
+    uploaded_blocks = []
+    for start_idx in range(0, len(api_blocks), 100):
+        batch = api_blocks[start_idx : start_idx + 100]
+        payload = []
+        children = []
+        for block in batch:
+            block_type = block["type"]
+            block_data = dict(block[block_type])
+            children.append(block_data.pop("children", []) if block_type != "table" else [])
+            payload.append({**block, block_type: block_data})
+
+        result = _append_block_batch(wrapper, parent_id, payload)
+        if len(result) != len(batch):
+            raise RuntimeError("Notion returned an unexpected number of uploaded blocks")
+        uploaded_blocks.extend(result)
+        for uploaded_block, child_blocks in zip(result, children):
+            if child_blocks:
+                _upload_block_tree(wrapper, uploaded_block["id"], child_blocks)
+    return uploaded_blocks
+
+
 def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_database, database_schema, rejected_tracker, notebook_name, unsupported_dir=None):
     """Internal: Upload note with partial import support.
     
@@ -261,15 +315,7 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
         has_errors = True
 
     # Convert blocks to API format
-    api_blocks = []
-    for block in note_blocks:
-        converted = convert_block_to_api_format(block)
-        if converted:
-            # Tables may return a list if they were split
-            if isinstance(converted, list):
-                api_blocks.extend(converted)
-            else:
-                api_blocks.append(converted)
+    api_blocks = _convert_note_blocks(note_blocks)
     
     # Collect any warnings from conversion phase
     conversion_warnings = get_warnings()
@@ -312,38 +358,12 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
     )
 
     block_upload_error = None
-    max_retries = 3
     uploaded_blocks = []  # Store all uploaded block objects with IDs
     
     try:
         for start_idx in progress_iter:
             batch = api_blocks[start_idx : start_idx + 100]
-            
-            # Retry logic for this batch
-            for attempt in range(max_retries):
-                try:
-                    result = wrapper.append_blocks(block_id=page_id, children=batch)
-                    uploaded_blocks.extend(result)  # Store uploaded blocks with IDs
-                    break  # Success - move to next batch
-                except Exception as batch_error:
-                    is_last_attempt = (attempt == max_retries - 1)
-                    
-                    # Check if it's a transient error worth retrying
-                    error_msg = str(batch_error).lower()
-                    is_transient = any(x in error_msg for x in [
-                        "timeout", "connection", "rate limit", "429", "503", "502", "500"
-                    ])
-                    
-                    if is_transient and not is_last_attempt:
-                        wait_time = (2 ** attempt) * 0.5  # 0.5s, 1s, 2s
-                        logger.warning(
-                            f"Transient error uploading block batch (attempt {attempt + 1}/{max_retries}): {batch_error}"
-                        )
-                        time.sleep(wait_time)
-                        continue
-                    
-                    # Last attempt or permanent error - raise it
-                    raise batch_error
+            uploaded_blocks.extend(_upload_block_tree(wrapper, page_id, batch))
     except Exception as e:
         # Block upload failed - keep page as partial import
         block_upload_error = str(e)

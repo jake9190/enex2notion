@@ -139,6 +139,28 @@ def test_list_ul_nested(parse_html):
     assert parse_note_blocks(test_note) == expected
 
 
+@pytest.mark.parametrize(
+    "list_tag,block_type",
+    [("ul", NotionBulletedListBlock), ("ol", NotionNumberedListBlock)],
+)
+def test_list_wrapped_nested_lists(parse_html, list_tag, block_type):
+    test_note = parse_html(
+        f"<{list_tag}><li><div>parent"
+        "<ul><li>child<div><ol><li>grandchild</li></ol></div></li></ul>"
+        f"</div></li><li>sibling</li></{list_tag}>"
+    )
+
+    parent = block_type(text_prop=TextProp("parent"))
+    child = NotionBulletedListBlock(text_prop=TextProp("child"))
+    child.children = [NotionNumberedListBlock(text_prop=TextProp("grandchild"))]
+    parent.children = [child]
+
+    assert parse_note_blocks(test_note) == [
+        parent,
+        block_type(text_prop=TextProp("sibling")),
+    ]
+
+
 def test_list_ul_images_inside(parse_html, caplog):
     test_note = parse_html(
         "<ul>"
