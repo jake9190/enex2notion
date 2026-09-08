@@ -43,7 +43,7 @@ def comparison_url(url):
         return url
 
 
-def comparison_date(value):
+def comparison_date(value, minute_precision=False):
     result = dict(value)
     for key in ("start", "end"):
         text = result.get(key)
@@ -52,7 +52,10 @@ def comparison_date(value):
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
             if parsed.tzinfo:
-                result[key] = parsed.astimezone(timezone.utc).isoformat()
+                parsed = parsed.astimezone(timezone.utc)
+                if minute_precision:
+                    parsed = parsed.replace(second=0, microsecond=0)
+                result[key] = parsed.isoformat()
         except ValueError:
             pass
     return result
@@ -143,6 +146,15 @@ def property_projection(page, properties):
         name: {kind: page.get("properties", {}).get(name, {}).get(kind)}
         for name, definition in properties.items() for kind in definition
     }
+
+
+def comparison_properties(properties):
+    result = copy.deepcopy(properties)
+    for name in ("Created", "Updated"):
+        value = result.get(name, {})
+        if isinstance(value.get("date"), dict):
+            value["date"] = comparison_date(value["date"], minute_precision=True)
+    return canonical(result)
 
 
 def preview_blocks(blocks):
@@ -254,12 +266,14 @@ class Reimporter:
             for index, block in enumerate(proposed)
         ]
         original_properties = property_projection(snapshot["page"], properties)
+        compared_original_properties = comparison_properties(original_properties)
+        compared_properties = comparison_properties(properties)
         property_changes = {
             name: value for name, value in properties.items()
-            if canonical(value) != canonical(original_properties.get(name))
+            if compared_properties.get(name) != compared_original_properties.get(name)
         }
-        before = canonical({"blocks": original_payload, "properties": original_properties})
-        after = canonical({"blocks": compared_proposed, "properties": properties})
+        before = canonical({"blocks": original_payload, "properties": compared_original_properties})
+        after = canonical({"blocks": compared_proposed, "properties": compared_properties})
         return {
             "action": "unchanged" if before == after else "replace",
             "editor_fallback": editor_fallback,

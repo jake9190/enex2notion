@@ -233,8 +233,8 @@ def test_empty_paragraph_with_date_changes_only_updates_metadata(importer, tmp_p
         "Created": {"date": {"start": note.created.isoformat()}},
         "Updated": {"date": {"start": note.updated.isoformat()}},
     })
-    note.created = note.created.replace(second=27)
-    note.updated = note.updated.replace(second=47)
+    note.created = note.created.replace(minute=1, second=27)
+    note.updated = note.updated.replace(minute=1, second=47)
     importer.remote.snapshot.return_value = snapshot
     schema = {"title": {"title": {}}, "Created": {"date": {}}, "Updated": {"date": {}}}
     plan = importer.plan(note, "notebook", [snapshot["page"]], schema)
@@ -248,6 +248,67 @@ def test_empty_paragraph_with_date_changes_only_updates_metadata(importer, tmp_p
     journal = json.loads(next((tmp_path / "reimport-backups").glob("*.json")).read_text())
     assert journal["status"] == "complete"
     assert journal["new_root_ids"] == journal["archived_ids"] == []
+
+
+@pytest.mark.parametrize("created_second,updated_second", [(1, 56), (5, 50), (3, 54), (7, 44)])
+@pytest.mark.parametrize("url_changed", [False, True])
+def test_imported_dates_ignore_seconds_in_plan_and_preview(importer, created_second, updated_second, url_changed):
+    note = make_note()
+    snapshot = make_snapshot(text="Replacement")
+    snapshot["page"]["properties"].update({
+        "Created": {"date": {"start": note.created.isoformat()}},
+        "Updated": {"date": {"start": note.updated.isoformat()}},
+    })
+    note.created = note.created.replace(second=created_second, microsecond=123000)
+    note.updated = note.updated.replace(second=updated_second)
+    if url_changed:
+        note.url = "https://example.com/changed"
+    importer.remote.snapshot.return_value = snapshot
+    schema = {"title": {"title": {}}, "Created": {"date": {}}, "Updated": {"date": {}}, "URL": {"url": {}}}
+
+    plan = importer.plan(note, "notebook", [snapshot["page"]], schema)
+
+    assert plan["action"] == ("replace" if url_changed else "unchanged")
+    assert plan["properties"] == ({"URL": {"url": note.url}} if url_changed else {})
+    assert plan["before"]["properties"]["Created"] == plan["after"]["properties"]["Created"]
+    assert plan["before"]["properties"]["Updated"] == plan["after"]["properties"]["Updated"]
+    assert note.created.second == created_second
+    assert note.updated.second == updated_second
+    importer.display(note.title, plan)
+    if not url_changed:
+        assert plan["before"] == plan["after"]
+        importer.output.assert_called_once_with("UNCHANGED: Note")
+    assert importer.wrapper.mock_calls == []
+
+
+@pytest.mark.parametrize("existing,source,expected", [
+    ("2023-04-02T17:13:00Z", "2023-04-02T13:13:59-04:00", "unchanged"),
+    ("2023-04-02T17:13:59Z", "2023-04-02T17:14:00Z", "replace"),
+    ("2023-04-02", "2023-04-02T00:00:00Z", "replace"),
+    (None, "2023-04-02T17:13:00Z", "replace"),
+])
+def test_imported_date_minute_boundaries_and_missing_values(importer, existing, source, expected):
+    note = make_note()
+    note.created = datetime.fromisoformat(source)
+    snapshot = make_snapshot(text="Replacement")
+    snapshot["page"]["properties"]["Created"] = {"date": {"start": existing} if existing else None}
+    importer.remote.snapshot.return_value = snapshot
+    plan = importer.plan(note, "notebook", [snapshot["page"]], {"title": {"title": {}}, "Created": {"date": {}}})
+    assert plan["action"] == expected
+    if expected == "replace":
+        assert plan["properties"]["Created"]["date"]["start"] == note.created.isoformat()
+
+
+@pytest.mark.parametrize("protection", ["cutoff", "baseline"])
+def test_edit_protection_preserves_seconds(importer, protection):
+    if protection == "cutoff":
+        importer.args.skip_edited_after = datetime.fromisoformat("2026-09-01T00:00:00Z")
+    else:
+        importer.state.record("notebook", make_note(), make_snapshot())
+        importer.args.skip_changed_since_import = True
+    importer.remote.snapshot.return_value = make_snapshot(edited="2026-09-01T00:00:01Z")
+    assert make_plan(importer)["action"] == "skip"
+    assert importer.wrapper.mock_calls == []
 
 
 def test_equivalent_url_and_date_representations_compare_equal():

@@ -144,8 +144,12 @@ the ENEX hash and filename; actual uploads remain subject to Notion validation.
 
 Equivalent timezone/millisecond date representations and equivalent URL escapes
 are ignored when comparing values. Only changed metadata fields are written.
-Real date differences are preserved: `21:32:00` and `21:32:10` differ by ten seconds
-and are not treated as equivalent. Reserved URL separators are not decoded.
+Imported `Created` and `Updated` properties are compared at minute precision
+after timezone normalization, accommodating Notion's observed seconds truncation.
+For these two properties, `21:32:00` and `21:32:56` compare equally; `21:33:00`
+still differs. This affects both preview and update selection, not the original
+ENEX timestamps. Dates in note content and edit-protection timestamps retain full
+precision. Reserved URL separators are not decoded.
 
 Apply replacements, protecting notes edited after a cutoff:
 
