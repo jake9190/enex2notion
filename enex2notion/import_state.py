@@ -59,8 +59,18 @@ class ImportRemote:
             kwargs["start_cursor"] = cursor
 
     def search(self, title):
+        def search_page(**body):
+            response = requests.post(
+                "https://api.notion.com/v1/search",
+                json=body,
+                headers={"Notion-Version": NOTION_API_VERSION, "Authorization": f"Bearer {self.wrapper._auth_token}"},
+                timeout=60,
+            )
+            response.raise_for_status()
+            return response.json()
+
         return [
-            item for item in self.paginate(self.wrapper.client.search, query=title, page_size=100)
+            item for item in self.paginate(search_page, query=title, page_size=100)
             if object_title(item) == title and not item.get("archived") and not item.get("in_trash")
         ]
 

@@ -152,6 +152,26 @@ current directory. The since-import flag skips notes with no known
 baseline, including older imports: Notion's current edit time alone cannot prove
 whether a note has changed since import. Both protection flags can be combined.
 
+For older imports without a baseline, an optional last-editor fallback is available:
+
+```shell
+python -m enex2notion Notebook.enex --use-env --reimport --whatif 5 --skip-changed-since-import --allow-importer-last-edit --operations-dir ./operations
+```
+
+This requires the page and **every nested block** to have `last_edited_by.id`
+equal to the authenticated integration's user ID, not merely the display name
+`enex2notion`. Missing or different editors are rejected. It applies only without
+a recorded baseline and never overrides a changed baseline or date cutoff.
+This is a heuristic: an integration edit can follow an earlier human edit, so it
+does not prove the absence of human changes. Review the preview before applying.
+
+`missing or ambiguous notebook` is a discovery problem, not an edit-protection
+decision. Re-import now pins search to the same database-compatible Notion API
+version used for database queries. Lookup failures report the expected filename
+stem, mode, root, and candidate IDs. For a renamed export or duplicate notebook
+names, add `--notebook-id ID` with exactly one ENEX file; the specified notebook
+must still belong to the selected root and match `--mode DB` or `--mode PAGE`.
+
 Matching is restricted to the existing root and notebook (the ENEX filename without
 its extension), in the selected `--mode DB` or `--mode PAGE`. A recorded page ID
 takes precedence; older imports require a unique exact title match. Missing or

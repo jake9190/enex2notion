@@ -91,11 +91,23 @@ def preview_blocks(blocks):
     return _convert_note_blocks(prepared)
 
 
-def protection_reason(snapshot, record, cutoff, skip_changed):
+def all_last_edited_by(snapshot, user_id):
+    def matches(value):
+        editor_id = value.get("last_edited_by", {}).get("id")
+        return bool(editor_id) and same_id(editor_id, user_id) and all(
+            matches(child) for child in value.get("_children", [])
+        )
+
+    return bool(user_id) and matches(snapshot["page"]) and all(matches(block) for block in snapshot["blocks"])
+
+
+def protection_reason(snapshot, record, cutoff, skip_changed, importer_id=None):
     if cutoff and latest_edit(snapshot) > cutoff:
         return "edited in Notion after the cutoff"
     if skip_changed:
         if not record or not same_id(record["page_id"], snapshot["page"]["id"]):
+            if importer_id and all_last_edited_by(snapshot, importer_id):
+                return None
             return "no recorded import baseline; cannot establish whether Notion was edited"
         if record["signature"] != edit_signature(snapshot):
             return "changed in Notion since the recorded import"
@@ -111,6 +123,7 @@ class Reimporter:
         self.directory = Path(directory)
         self.state = ImportState(directory)
         self.output = output
+        self.importer_id = None
 
     def plan(self, note, notebook_id, pages, schema):
         record = self.state.get(notebook_id, note)
@@ -131,8 +144,15 @@ class Reimporter:
             return {"action": "skip", "reason": str(error)}
         if not belongs_to(snapshot["page"], notebook_id):
             return {"action": "skip", "reason": "page moved out of the selected notebook"}
+        editor_fallback = self.args.allow_importer_last_edit and not record
+        if editor_fallback and self.importer_id is None:
+            identity = self.remote.call(self.wrapper.client.users.me)
+            if identity.get("type") != "bot" or not identity.get("id"):
+                return {"action": "skip", "reason": "could not verify authenticated integration user ID"}
+            self.importer_id = identity["id"]
         reason = protection_reason(
             snapshot, record, self.args.skip_edited_after, self.args.skip_changed_since_import,
+            self.importer_id if editor_fallback else None,
         )
         if reason:
             return {"action": "skip", "reason": reason}
@@ -159,12 +179,15 @@ class Reimporter:
         after = canonical({"blocks": proposed, "properties": properties})
         return {
             "action": "unchanged" if before == after else "replace",
+            "editor_fallback": editor_fallback,
             "snapshot": snapshot, "blocks": blocks, "properties": properties,
             "before": before, "after": after, "note": note, "notebook_id": notebook_id,
         }
 
     def display(self, title, plan):
         self.output(f"{plan['action'].upper()}: {title}" + (f" ({plan['reason']})" if plan.get("reason") else ""))
+        if plan.get("editor_fallback"):
+            self.output("  Allowed by last-editor fallback: the integration last edited the page and all blocks; earlier human edits cannot be ruled out.")
         if plan["action"] != "replace":
             return
         self.output(f"  Page: {plan['snapshot']['page']['id']}; replace {len(plan['snapshot']['blocks'])} existing top-level blocks")
@@ -258,6 +281,8 @@ def reimport_command(args):
     for path in args.enex_input:
         files.extend(sorted(path.glob("**/*.enex")) if path.is_dir() else [path])
     files = list(dict.fromkeys(path.resolve() for path in files))
+    if args.notebook_id and len(files) != 1:
+        raise ValueError("--notebook-id requires exactly one ENEX file")
     visited = 0
     totals = Counter()
     for path in files:
@@ -267,8 +292,26 @@ def reimport_command(args):
         notes = [result.note for result in stats.results if not result.failed and result.note]
         titles = Counter(note.title for note in notes)
         expected_type = "database" if args.mode == "DB" else "page"
-        notebooks = [item for item in importer.remote.search(path.stem)
-                     if item.get("object") == expected_type and belongs_to(item, root_id)]
+        if args.notebook_id:
+            selected = wrapper.get_database(args.notebook_id) if args.mode == "DB" else importer.remote.page(args.notebook_id)
+            candidates = [selected]
+        else:
+            candidates = importer.remote.search(path.stem)
+        notebooks = [item for item in candidates
+                     if item.get("object") == expected_type and belongs_to(item, root_id)
+                     and not item.get("archived") and not item.get("in_trash")]
+        notebook_failure = (
+            f"notebook lookup for '{path.stem}' (--mode {args.mode}, root {root_id}): "
+            f"{len(notebooks)} matching notebooks; "
+            "check filename, --mode, root access, or supply --notebook-id"
+        )
+        if len(notebooks) != 1:
+            importer.output(notebook_failure)
+            for candidate in candidates:
+                importer.output(
+                    f"  Candidate: {candidate.get('id')} type={candidate.get('object')} "
+                    f"title={object_title(candidate)!r} parent={candidate.get('parent')}"
+                )
         pages, schema = [], None
         if len(notebooks) == 1:
             notebook_id = notebooks[0]["id"]
@@ -283,7 +326,7 @@ def reimport_command(args):
             if result.failed or not note:
                 plan = {"action": "skip", "reason": "ENEX note could not be parsed"}
             elif len(notebooks) != 1:
-                plan = {"action": "skip", "reason": "missing or ambiguous notebook"}
+                plan = {"action": "skip", "reason": notebook_failure}
             elif titles[note.title] > 1:
                 plan = {"action": "skip", "reason": "duplicate source title; cannot safely match"}
             else:

@@ -337,3 +337,106 @@ def test_state_directory_matches_regular_import_priority(tmp_path):
     assert state_directory(args) == tmp_path / "progress"
     args.operations_dir = tmp_path / "operations"
     assert state_directory(args) == tmp_path / "operations"
+
+
+def test_search_uses_database_compatible_api_version(mocker):
+    wrapper = mocker.Mock()
+    wrapper._rate_limit_delay = 0
+    wrapper._auth_token = "test-token"
+    wrapper._retry_on_rate_limit.side_effect = lambda function, **kwargs: function(**kwargs)
+    first, second = mocker.Mock(), mocker.Mock()
+    database = {"object": "database", "id": "db", "title": [{"plain_text": "Notebook"}]}
+    first.json.return_value = {"results": [], "has_more": True, "next_cursor": "next"}
+    second.json.return_value = {"results": [database], "has_more": False}
+    post = mocker.patch("enex2notion.import_state.requests.post", side_effect=[first, second])
+
+    assert ImportRemote(wrapper).search("Notebook") == [database]
+    assert post.call_args.args[0] == "https://api.notion.com/v1/search"
+    assert post.call_args.kwargs["headers"]["Notion-Version"] == "2022-06-28"
+    assert post.call_args.kwargs["json"]["start_cursor"] == "next"
+    wrapper.client.search.assert_not_called()
+
+
+def test_last_editor_fallback_requires_every_block(importer):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_importer_last_edit = True
+    importer.importer_id = "importer-bot"
+    snapshot = make_snapshot()
+    snapshot["page"]["last_edited_by"] = {"id": "importer-bot"}
+    snapshot["blocks"][0]["last_edited_by"] = {"id": "importer-bot"}
+    snapshot["blocks"][0]["_children"] = [{
+        "id": "child", "type": "paragraph", "last_edited_time": "2026-09-01T00:00:00Z",
+        "last_edited_by": {"id": "importer-bot"}, "paragraph": {"rich_text": []},
+    }]
+    importer.remote.snapshot.return_value = snapshot
+    assert make_plan(importer)["action"] == "replace"
+    assert make_plan(importer)["editor_fallback"] is True
+    snapshot["blocks"][0]["_children"][0]["last_edited_by"] = {"id": "human"}
+    assert make_plan(importer)["action"] == "skip"
+    snapshot["blocks"][0]["_children"][0].pop("last_edited_by")
+    assert make_plan(importer)["action"] == "skip"
+
+
+def test_last_editor_fallback_never_overrides_baseline_or_cutoff(importer):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_importer_last_edit = True
+    importer.importer_id = "importer-bot"
+    snapshot = make_snapshot()
+    for value in [snapshot["page"], *snapshot["blocks"]]:
+        value["last_edited_by"] = {"id": "importer-bot"}
+    importer.remote.snapshot.return_value = snapshot
+    importer.args.skip_edited_after = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert make_plan(importer)["action"] == "skip"
+    importer.args.skip_edited_after = None
+    importer.state.record("notebook", make_note(), make_snapshot(edited="2026-08-01T00:00:00Z"))
+    assert make_plan(importer)["action"] == "skip"
+
+
+def test_fallback_verifies_integration_id_not_display_name(importer):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_importer_last_edit = True
+    importer.remote.call.return_value = {"id": "real-bot", "type": "bot", "name": "enex2notion"}
+    snapshot = make_snapshot()
+    for value in [snapshot["page"], *snapshot["blocks"]]:
+        value["last_edited_by"] = {"id": "different-bot", "name": "enex2notion"}
+    importer.remote.snapshot.return_value = snapshot
+    assert make_plan(importer)["action"] == "skip"
+    assert importer.importer_id == "real-bot"
+
+
+@pytest.mark.parametrize("options", [["--allow-importer-last-edit"], ["--notebook-id", "db"]])
+def test_new_options_require_explicit_safeguards(options):
+    with pytest.raises(SystemExit):
+        parse_args(["--token", "test-token", *options, "notes.enex"])
+
+
+@pytest.mark.parametrize("parent_id,expected", [("root", "would replace"), ("other-root", "0 would replace")])
+def test_explicit_notebook_id_remains_root_scoped(tmp_path, mocker, capsys, parent_id, expected):
+    args = parse_args([
+        "--token", "test-token", "--reimport", "--whatif", "1", "--mode", "PAGE",
+        "--notebook-id", "notebook", "--operations-dir", str(tmp_path), "renamed-export.enex",
+    ])
+    wrapper = mocker.Mock()
+    mocker.patch("enex2notion.cli_reimport.get_notion_wrapper", return_value=wrapper)
+    remote = mocker.patch("enex2notion.cli_reimport.ImportRemote").return_value
+    remote.search.return_value = [{"id": "root", "object": "page"}]
+    remote.page.return_value = {"id": "notebook", "object": "page", "parent": {"page_id": parent_id}}
+    remote.notebook_pages.return_value = [make_snapshot()["page"]]
+    remote.snapshot.return_value = make_snapshot()
+    mocker.patch("enex2notion.cli_reimport.parse_all_notes", return_value=SimpleNamespace(results=[
+        SimpleNamespace(note=make_note(), failed=False),
+    ]))
+
+    reimport_command(args)
+
+    output = capsys.readouterr().out
+    assert expected in output
+    remote.search.assert_called_once_with(args.root_page)
+    remote.page.assert_called_once_with("notebook")
+    if parent_id == "other-root":
+        remote.notebook_pages.assert_not_called()
+        assert "--mode PAGE" in output and "0 matching notebooks" in output
+    else:
+        assert "1 would replace" in output
+    assert wrapper.mock_calls == []
+    assert list(tmp_path.iterdir()) == []

@@ -152,6 +152,14 @@ def parse_args(argv):
             "action": "store_true",
             "help": "replace previously imported notes in place; skip missing or ambiguous matches",
         },
+        "--notebook-id": {
+            "metavar": "ID",
+            "help": "with --reimport, select one existing notebook by ID within the selected root (one ENEX file only)",
+        },
+        "--allow-importer-last-edit": {
+            "action": "store_true",
+            "help": "with --skip-changed-since-import, allow unknown baselines only when the integration last edited the page and all blocks; cannot rule out earlier human edits",
+        },
         "--whatif": {
             "type": _positive_count,
             "metavar": "N",
@@ -260,6 +268,10 @@ def parse_args(argv):
 
     if (args.whatif or args.skip_edited_after or args.skip_changed_since_import) and not args.reimport:
         parser.error("--whatif and edit safeguards require --reimport")
+    if args.notebook_id and not args.reimport:
+        parser.error("--notebook-id requires --reimport")
+    if args.allow_importer_last_edit and not args.skip_changed_since_import:
+        parser.error("--allow-importer-last-edit requires --skip-changed-since-import")
     if args.reimport and (args.resolve_links or args.retry_failed_links or args.check_duplicates):
         parser.error("--reimport cannot be combined with link or duplicate commands")
     if args.reimport and args.dry_run:

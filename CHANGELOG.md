@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Pin re-import search to the database-compatible API version; add notebook lookup diagnostics and explicit `--notebook-id` selection.
+- Add opt-in `--allow-importer-last-edit` fallback for unknown baselines, checking authenticated integration IDs on pages and all nested blocks.
+
 - Add in-place `--reimport` with notebook-scoped matching and `--whatif N` read-only diffs.
 - Add timezone-aware `--skip-edited-after` and baseline-backed `--skip-changed-since-import` safeguards.
 - Record successful import baselines and replacement recovery records without modifying Notion database schemas.
