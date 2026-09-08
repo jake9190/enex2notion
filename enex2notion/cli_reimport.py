@@ -311,7 +311,6 @@ class Reimporter:
         journal = {"status": "prepared", "original": snapshot, "new_root_ids": [], "archived_ids": []}
         retained_ids = {block["id"] for block in plan["retained"].values()}
         journal["retained_ids"] = sorted(retained_ids)
-        write_json(journal_path, journal)
         blocks = []
         source_ranges = []
         position = 0
@@ -324,12 +323,13 @@ class Reimporter:
             position += count
         warnings = _process_image_blocks(blocks, self.wrapper, notebook_name="reimport", note_title=plan["note"].title)
         if warnings:
-            raise RuntimeError("Attachment upload warnings; original note preserved: " + "; ".join(warnings))
+            raise RuntimeError(f"Attachment upload failed for {plan['note'].title!r}; original note preserved: " + "; ".join(warnings))
 
         def validate_files(items):
             for block in items:
                 if isinstance(block, NotionUploadableBlock) and not block.attrs.get("file_upload_id"):
-                    raise RuntimeError("Attachment did not upload; original note preserved")
+                    filename = getattr(block.resource, "file_name", None) or "[unnamed]"
+                    raise RuntimeError(f"Attachment {filename!r} did not upload; original note preserved")
                 validate_files(block.children)
 
         validate_files(blocks)
@@ -341,6 +341,7 @@ class Reimporter:
             additions.update({index: block for index, block in zip(indices, converted) if index not in plan["retained"]})
         if edit_signature(self.remote.snapshot(page_id)) != edit_signature(snapshot):
             raise RuntimeError("Page changed during attachment preparation; no content replaced")
+        write_json(journal_path, journal)
         new_roots = []
         try:
             pending = []

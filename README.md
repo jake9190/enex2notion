@@ -202,7 +202,16 @@ Unrelated database properties, page icons, and covers are left alone; standard
 imported title, Created, Updated, URL, Tags, and Partial Import fields are updated
 only when their values differ.
 
-Before replacing content, the importer writes a JSON recovery record under
+Attachment preparation happens before page changes. If an attachment fails,
+re-import reports its filename and available rejection reason, preserves the
+original page, and stops without creating a recovery record or import baseline.
+Successfully uploaded but unattached files may still exist temporarily in Notion.
+An older version may have left a `prepared` record after an attachment failure.
+Only move that record out of the backup directory after confirming the traceback
+stopped during attachment preparation and the original page is intact; `prepared`
+status and empty ID lists alone do not prove that no blocks were inserted.
+
+After successful preparation and before replacing content, the importer writes a JSON recovery record under
 `operations/reimport-backups/`, uploads new blocks, rechecks the original content,
 then archives only the replaced blocks. Retained block IDs are included in the
 record. Failed requests stop the run and leave an incomplete

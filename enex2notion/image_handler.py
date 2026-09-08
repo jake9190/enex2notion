@@ -43,12 +43,15 @@ def upload_image_to_notion(
         File upload ID string (to be used with type: file_upload), or None if failed
     """
     if not resource:
+        add_warning("Attachment has no ENEX resource; cannot upload")
         return None
 
     # Check if we have image data
     data_bin = getattr(resource, "data_bin", None)
     if not data_bin:
-        logger.warning(f"Resource has no data_bin, cannot upload")
+        warning = f"Attachment '{getattr(resource, 'file_name', None) or '[unnamed]'}' has no data; cannot upload"
+        add_warning(warning)
+        logger.warning(warning)
         return None
 
     # Get original filename from resource, or fall back to hash
@@ -76,6 +79,8 @@ def upload_image_to_notion(
                 filename=filename,
                 mime_type=mime,
             )
+            if not upload_id:
+                raise RuntimeError("Notion returned no file upload ID")
             logger.debug(f"  Uploaded as file_upload ID: {upload_id}")
             return upload_id
         except Exception as e:
@@ -122,6 +127,7 @@ def upload_image_to_notion(
             "expected",  # Multipart upload failures
             "part url"
         ]):
+            saved_path = None
             # Don't treat as warning/error - save to disk with original filename
             # Save file to disk with original filename (not modified)
             if unsupported_dir:
@@ -138,8 +144,10 @@ def upload_image_to_notion(
                     # Track for later addition to exceptions database
                     if failed_uploads_list is not None:
                         failed_uploads_list.append({"filename": filename, "path": str(saved_path)})
-                else:
-                    logger.info(f"Saved {filename} to unsupported-files directory (path unavailable)")
+            if not saved_path:
+                warning = f"File upload failed: '{filename}' ({mime}, {len(data_bin)} bytes) - {error_msg}"
+                add_warning(warning)
+                logger.warning(warning)
             
             # Note: Don't track in rejected_tracker - unsupported files are handled separately
         else:

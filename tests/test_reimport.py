@@ -627,6 +627,30 @@ def test_same_filename_does_not_prove_file_identity(importer, mocker, verified):
     assert "signature=temporary" in plan["snapshot"]["blocks"][0]["pdf"]["file"]["url"]
 
 
+@pytest.mark.parametrize("failure", ["rejected", "validation"])
+def test_attachment_preparation_failure_leaves_no_recovery_record(importer, mocker, tmp_path, failure):
+    note, original, _ = attachment_note_and_snapshot("image", "image/png")
+    importer.remote.snapshot.return_value = original
+    mocker.patch("enex2notion.reimport_attachments.hosted_digest", return_value=None)
+    plan = make_plan(importer, note)
+    if failure == "rejected":
+        importer.wrapper.upload_file.side_effect = ValueError("File content type rejected")
+    else:
+        mocker.patch("enex2notion.cli_reimport._process_image_blocks", return_value=[])
+
+    with pytest.raises(RuntimeError, match="original note preserved") as error:
+        importer.execute(plan)
+
+    assert note.resources[0].file_name in str(error.value)
+    if failure == "rejected":
+        assert "File content type rejected" in str(error.value)
+    importer.wrapper.append_blocks.assert_not_called()
+    importer.remote.archive.assert_not_called()
+    importer.remote.update_properties.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+    assert make_plan(importer, note)["action"] == "replace"
+
+
 def test_execution_never_uploads_or_archives_retained_file(importer, mocker):
     note, original, digest = attachment_note_and_snapshot()
     importer.remote.snapshot.return_value = original

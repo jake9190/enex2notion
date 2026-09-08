@@ -4,8 +4,9 @@ from unittest.mock import Mock
 import pytest
 
 from enex2notion.enex_types import EvernoteNote
-from enex2notion.enex_uploader import _convert_note_blocks, _upload_block_tree, _upload_note
+from enex2notion.enex_uploader import _convert_note_blocks, _process_image_blocks, _upload_block_tree, _upload_note
 from enex2notion.note_parser.blocks import parse_note_blocks
+from enex2notion.notion_blocks.uploadable import NotionImageBlock
 
 
 def _make_note(content):
@@ -160,3 +161,75 @@ def test_short_upload_response_keeps_returned_ids_and_stops_children():
         _upload_block_tree(wrapper, "page", blocks, uploaded_roots=roots, after="retained")
     assert roots == [{"id": "partial"}]
     wrapper.append_blocks.assert_called_once()
+
+
+@pytest.mark.parametrize("reason", [
+    "File content type image/png does not match extension .jpg",
+    "File extension that is not supported",
+    "Expected 2 part URLs, got 0",
+])
+def test_rejected_image_without_disk_fallback_reports_reason(reason):
+    resource = Mock(data_bin=b"image", file_name="photo.jpg", mime="image/png")
+    block = NotionImageBlock(md5_hash="hash", resource=resource)
+    wrapper = Mock()
+    wrapper.upload_file.side_effect = ValueError(reason)
+
+    warnings = _process_image_blocks([block], wrapper)
+
+    assert any("photo.jpg" in warning and reason in warning for warning in warnings)
+    assert block.attrs["upload_failed"] is True
+    assert "file_upload_id" not in block.attrs
+    wrapper.upload_file.assert_called_once()
+
+
+def test_upload_worker_exception_reports_filename(mocker):
+    block = NotionImageBlock(md5_hash="hash", resource=Mock(file_name="photo.jpg"))
+    mocker.patch("enex2notion.enex_uploader._upload_single_file", side_effect=ValueError("worker failure"))
+    warnings = _process_image_blocks([block], Mock())
+    assert warnings == ["File upload failed: 'photo.jpg' - worker failure"]
+    assert block.attrs["upload_failed"] is True
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_rejected_image_fallback_only_suppresses_warning_when_saved(mocker, tmp_path, saved):
+    block = NotionImageBlock(md5_hash="hash", resource=Mock(
+        data_bin=b"image", file_name="photo.jpg", mime="image/png",
+    ))
+    wrapper = Mock()
+    wrapper.upload_file.side_effect = ValueError("File content type rejected")
+    saved_path = tmp_path / "photo.jpg" if saved else None
+    save = mocker.patch("enex2notion.image_handler._save_unsupported_file", return_value=saved_path)
+    failed_uploads = []
+    warnings = _process_image_blocks(
+        [block], wrapper, unsupported_dir=tmp_path, failed_uploads_list=failed_uploads,
+    )
+    save.assert_called_once()
+    if saved:
+        assert warnings == []
+        assert failed_uploads == [{"filename": "photo.jpg", "path": str(saved_path)}]
+    else:
+        assert any("photo.jpg" in warning and "File content type rejected" in warning for warning in warnings)
+        assert failed_uploads == []
+
+
+@pytest.mark.parametrize("missing_resource", [False, True])
+def test_missing_image_data_reports_warning_without_upload(missing_resource):
+    resource = None if missing_resource else Mock(data_bin=b"", file_name="empty.png")
+    block = NotionImageBlock(md5_hash="hash", resource=resource)
+    wrapper = Mock()
+    warnings = _process_image_blocks([block], wrapper)
+    assert any("cannot upload" in warning for warning in warnings)
+    if not missing_resource:
+        assert any("empty.png" in warning for warning in warnings)
+    wrapper.upload_file.assert_not_called()
+
+
+def test_missing_upload_id_reports_filename():
+    block = NotionImageBlock(md5_hash="hash", resource=Mock(
+        data_bin=b"image", file_name="photo.png", mime="image/png",
+    ))
+    wrapper = Mock()
+    wrapper.upload_file.return_value = None
+    warnings = _process_image_blocks([block], wrapper)
+    assert any("photo.png" in warning and "no file upload ID" in warning for warning in warnings)
+    wrapper.upload_file.assert_called_once()

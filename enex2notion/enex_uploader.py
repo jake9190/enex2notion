@@ -193,7 +193,13 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
                         # Actual upload failure - this is unexpected
                         logger.warning(f"Failed to upload {block_type}")
             except Exception as e:
-                logger.error(f"File upload failed with exception: {e}")
+                block = future_to_block[future]
+                block.attrs["upload_failed"] = True
+                filename = getattr(block.resource, "file_name", None) or "[unnamed]"
+                warning = f"File upload failed: {filename!r} - {e}"
+                all_warnings.append(warning)
+                add_warning(warning)
+                logger.error(warning)
     
     return all_warnings
 
