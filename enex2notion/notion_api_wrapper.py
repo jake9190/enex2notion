@@ -342,6 +342,8 @@ class NotionAPIWrapper:
                     self.client.blocks.children.append, block_id=block_id, children=batch, **options
                 )
                 created_blocks.extend(response.get("results", []))
+                if len(response.get("results", [])) != len(batch):
+                    return created_blocks
                 if after is not None:
                     after = response["results"][-1]["id"]
                 logger.debug(f"Appended {len(batch)} blocks to {block_id}")

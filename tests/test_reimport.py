@@ -174,6 +174,57 @@ def test_canonical_attachment_reference_keeps_identity():
     }
 
 
+def test_empty_paragraph_representations_compare_equal():
+    empty = {"type": "paragraph", "paragraph": {"rich_text": []}}
+    explicit = {"type": "paragraph", "paragraph": {"rich_text": [
+        {"type": "text", "text": {"content": ""}},
+    ]}}
+    assert canonical(empty) == canonical(explicit)
+    assert canonical([empty, explicit]) != canonical([empty])
+    for content in (" ", "\n", "text"):
+        nonempty = copy.deepcopy(explicit)
+        nonempty["paragraph"]["rich_text"][0]["text"]["content"] = content
+        assert canonical(empty) != canonical(nonempty)
+    with_children = copy.deepcopy(explicit)
+    with_children["paragraph"]["children"] = [empty]
+    assert canonical(empty) != canonical(with_children)
+
+
+def test_empty_paragraph_is_retained_during_reimport(importer):
+    snapshot = make_snapshot()
+    snapshot["blocks"][0]["paragraph"]["rich_text"] = []
+    importer.remote.snapshot.return_value = snapshot
+    plan = make_plan(importer, make_note(content="<div><br/></div>"))
+    assert plan["action"] == "unchanged"
+    assert plan["retained"][0]["id"] == "old"
+    importer.wrapper.append_blocks.assert_not_called()
+
+
+def test_empty_paragraph_with_date_changes_only_updates_metadata(importer, tmp_path):
+    note = make_note(content="<div><br/></div>")
+    snapshot = make_snapshot()
+    snapshot["blocks"][0]["paragraph"]["rich_text"] = []
+    snapshot["page"]["properties"].update({
+        "Created": {"date": {"start": note.created.isoformat()}},
+        "Updated": {"date": {"start": note.updated.isoformat()}},
+    })
+    note.created = note.created.replace(second=27)
+    note.updated = note.updated.replace(second=47)
+    importer.remote.snapshot.return_value = snapshot
+    schema = {"title": {"title": {}}, "Created": {"date": {}}, "Updated": {"date": {}}}
+    plan = importer.plan(note, "notebook", [snapshot["page"]], schema)
+    assert plan["action"] == "replace"
+    assert plan["retained"][0]["id"] == "old"
+    assert set(plan["properties"]) == {"Created", "Updated"}
+    importer.execute(plan)
+    importer.wrapper.append_blocks.assert_not_called()
+    importer.remote.archive.assert_not_called()
+    importer.remote.update_properties.assert_called_once_with("page", plan["properties"])
+    journal = json.loads(next((tmp_path / "reimport-backups").glob("*.json")).read_text())
+    assert journal["status"] == "complete"
+    assert journal["new_root_ids"] == journal["archived_ids"] == []
+
+
 def test_equivalent_url_and_date_representations_compare_equal():
     before = {
         "URL": {"url": "https://example.com/path#:~:text=dogs%20who%27ve"},
@@ -248,6 +299,23 @@ def test_edit_between_plan_and_update_prevents_writes(importer, tmp_path):
         importer.execute(plan)
     assert importer.wrapper.mock_calls == []
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("returned_ids", [[], ["new", "extra"]])
+def test_unexpected_upload_count_records_response_and_preserves_original(importer, mocker, tmp_path, returned_ids):
+    plan = make_plan(importer)
+    configure_success(importer, mocker)
+    importer.wrapper.append_blocks.return_value = [{"id": block_id} for block_id in returned_ids]
+    with pytest.raises(RuntimeError, match=f"expected 1, received {len(returned_ids)}"):
+        importer.execute(plan)
+    importer.wrapper.append_blocks.assert_called_once()
+    importer.remote.archive.assert_not_called()
+    importer.remote.update_properties.assert_not_called()
+    journal = json.loads(next((tmp_path / "reimport-backups").glob("*.json")).read_text())
+    assert journal["status"] == "incomplete"
+    assert journal["new_root_ids"] == returned_ids
+    assert journal["archived_ids"] == []
+    assert not (tmp_path / "import-state.json").exists()
 
 
 def test_edit_during_upload_prevents_archiving(importer, mocker):

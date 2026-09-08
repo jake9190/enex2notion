@@ -210,6 +210,13 @@ record that blocks automatic retries for that page. These records contain note
 content and should be protected like the ENEX files. They are recovery records,
 not self-contained attachment backups; Notion-hosted file URLs may expire.
 
+Empty rich-text segments compare equal to an empty rich-text array; intentional
+blank paragraphs are retained, not deleted. An unexpected append-response count
+still stops the import before archiving original blocks. The error includes the
+expected and returned counts, and returned root IDs are recorded for inspection.
+Older versions did not record IDs from a mismatched batch, so an empty
+`new_root_ids` list does not prove that the failed request created nothing.
+
 For an interrupted replacement, inspect its original block IDs, newly created
 root IDs, and archived IDs. Restore the original blocks (unarchive if necessary)
 and remove the added blocks in Notion before moving the incomplete record out of

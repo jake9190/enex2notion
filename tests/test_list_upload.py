@@ -147,3 +147,16 @@ def test_inserted_batches_advance_anchor(parse_html):
     assert [call.kwargs["after"] for call in wrapper.append_blocks.call_args_list] == [
         "retained", "99", "199",
     ]
+
+
+def test_short_upload_response_keeps_returned_ids_and_stops_children():
+    wrapper = Mock()
+    wrapper.append_blocks.return_value = [{"id": "partial"}]
+    blocks = [{"type": "paragraph", "paragraph": {"rich_text": [], "children": [
+        {"type": "paragraph", "paragraph": {"rich_text": []}},
+    ]}} for _ in range(2)]
+    roots = []
+    with pytest.raises(RuntimeError, match="expected 2, received 1"):
+        _upload_block_tree(wrapper, "page", blocks, uploaded_roots=roots, after="retained")
+    assert roots == [{"id": "partial"}]
+    wrapper.append_blocks.assert_called_once()

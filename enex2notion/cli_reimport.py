@@ -78,6 +78,14 @@ def canonical(value):
             item = comparison_url(item)
         elif key == "date" and isinstance(item, dict):
             item = comparison_date(item)
+        elif key == "rich_text" and isinstance(item, list):
+            item = [
+                segment for segment in item
+                if not (
+                    isinstance(segment, dict) and segment.get("type") == "text"
+                    and segment.get("text", {}).get("content") == ""
+                )
+            ]
         cleaned = canonical(item)
         if cleaned in (None, [], {}) or (key == "color" and cleaned == "default"):
             continue

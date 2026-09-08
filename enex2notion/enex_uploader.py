@@ -244,11 +244,15 @@ def _upload_block_tree(wrapper, parent_id, api_blocks, uploaded_roots=None, afte
             payload.append({**block, block_type: block_data})
 
         result = _append_block_batch(wrapper, parent_id, payload, after=after)
-        if len(result) != len(batch):
-            raise RuntimeError("Notion returned an unexpected number of uploaded blocks")
-        uploaded_blocks.extend(result)
         if uploaded_roots is not None:
             uploaded_roots.extend(result)
+        if len(result) != len(batch):
+            raise RuntimeError(
+                f"Notion returned an unexpected number of uploaded blocks: expected {len(batch)}, "
+                f"received {len(result)} (parent={parent_id}, after={after}). "
+                "The request may have created blocks; inspect the page before retrying."
+            )
+        uploaded_blocks.extend(result)
         if after is not None:
             after = result[-1]["id"]
         for uploaded_block, child_blocks in zip(result, children):

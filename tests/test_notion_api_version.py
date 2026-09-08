@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 from notion_client import Client
 
 from enex2notion.notion_api_wrapper import NOTION_API_VERSION, NotionAPIWrapper
@@ -57,3 +58,26 @@ def test_sdk_passes_insertion_anchor_and_advances_batches(mocker):
 
     assert len(result) == 205
     assert [body["after"] for body in bodies] == ["existing-file", "99", "199"]
+
+
+@pytest.mark.parametrize("returned_count", [0, 1, 3])
+def test_sdk_unexpected_count_stops_later_batches(mocker, returned_count):
+    requests = []
+    returned = [{"id": str(index)} for index in range(returned_count)]
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"results": returned})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+        mocker.patch(
+            "enex2notion.notion_api_wrapper.Client",
+            side_effect=lambda **options: Client(client=http_client, **options),
+        )
+        wrapper = NotionAPIWrapper("test-token")
+        wrapper._rate_limit_delay = 0
+        blocks = [{"type": "paragraph", "paragraph": {"rich_text": []}} for _ in range(4)]
+        result = wrapper.append_blocks("page", blocks, max_batch=2, after="existing")
+
+    assert result == returned
+    assert len(requests) == 1
