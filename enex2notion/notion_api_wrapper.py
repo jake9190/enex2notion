@@ -81,7 +81,7 @@ class NotionAPIWrapper:
             auth_token: Notion Integration token (starts with secret_)
         """
         # Increase timeout for large file uploads and slow blocks (default is 60s)
-        self.client = Client(auth=auth_token, timeout_ms=600000)  # 10 minutes
+        self.client = Client(auth=auth_token, timeout_ms=600000, notion_version=NOTION_API_VERSION)  # 10 minutes
         self._auth_token = auth_token  # Store for raw API calls
         self._rate_limit_delay = 0.35  # ~3 requests/second
         self._max_retries = 6  # Maximum retry attempts for rate limit errors

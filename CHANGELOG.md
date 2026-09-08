@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Pin the Notion SDK to API version 2022-06-28 so database schema retrieval returns properties consistently with re-import search and queries.
 - Pin re-import search to the database-compatible API version; add notebook lookup diagnostics and explicit `--notebook-id` selection.
 - Add opt-in `--allow-importer-last-edit` fallback for unknown baselines, checking authenticated integration IDs on pages and all nested blocks.
 
