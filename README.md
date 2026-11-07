@@ -111,10 +111,11 @@ $ enex2notion
 ### Skipping Existing Pages
 
 Use `--skip-existing` during a normal import to skip a note only when the selected
-notebook already contains a page with the same title and ENEX updated date. In
-`DB` mode, matching uses the database's title and `Updated` date properties. In
-`PAGE` mode, existing pages need imported metadata (for example, use `--add-meta`)
-to compare the ENEX updated date. This option cannot be combined with `--reimport`.
+notebook already contains a page with the same title and ENEX updated date. Dates
+are compared at minute precision because Notion may truncate seconds. In `DB` mode,
+matching uses the database's title and `Updated` date properties. In `PAGE` mode,
+existing pages need imported metadata (for example, use `--add-meta`) to compare the
+ENEX updated date. This option cannot be combined with `--reimport`.
 
 ### Re-import Existing Notes
 

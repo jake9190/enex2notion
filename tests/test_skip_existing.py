@@ -45,7 +45,7 @@ def test_skip_existing_cli_option():
         parse_args(["--token", "test-token", "--skip-existing", "--reimport", "notes.enex"])
 
 
-def test_db_mode_loads_matching_title_and_updated_date(mocker, tmp_path):
+def test_db_mode_matches_updated_dates_to_minute_precision(mocker, tmp_path):
     wrapper = mocker.Mock()
     wrapper.list_database_pages.return_value = [{
         "properties": {
@@ -61,7 +61,9 @@ def test_db_mode_loads_matching_title_and_updated_date(mocker, tmp_path):
 
     uploader._load_existing_signatures()
 
-    assert uploader._signature("Example", "2026-01-02T00:00:00+00:00") in uploader.existing_signatures
+    assert uploader._signature(
+        "Example", datetime(2026, 1, 2, 0, 0, 45, tzinfo=timezone.utc)
+    ) in uploader.existing_signatures
 
 
 def test_page_mode_reads_updated_from_metadata_callout(mocker, tmp_path):

@@ -208,7 +208,7 @@ class EnexUploader(object):
             updated = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=UTC)
-            return updated.astimezone(UTC)
+            return updated.astimezone(UTC).replace(second=0, microsecond=0)
         except (AttributeError, TypeError, ValueError):
             return None
 
