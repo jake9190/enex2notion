@@ -1,4 +1,6 @@
 import logging
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 from enex2notion.enex_parser import parse_all_notes
@@ -79,11 +81,13 @@ class DoneFile(object):
 
 class EnexUploader(object):
     def __init__(
-        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, rejected_tracker=None, unsupported_dir: Path | None = None, working_dir: Path | None = None
+        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, rejected_tracker=None, unsupported_dir: Path | None = None, working_dir: Path | None = None, skip_existing: bool = False
     ):
         self.wrapper = wrapper  # NotionAPIWrapper instance
         self.root_id = root_id  # Root page ID string
         self.mode = mode
+        self.skip_existing = skip_existing
+        self.existing_signatures = set()
 
         self.rules = rules
 
@@ -177,6 +181,14 @@ class EnexUploader(object):
         # Phase 4: Upload successfully parsed notes
         successful_results = [r for r in parse_stats.results if not r.failed and r.note]
 
+        if self.skip_existing:
+            try:
+                self._load_existing_signatures()
+            except Exception as e:
+                logger.error(f"Failed to look up existing pages: {e}")
+                notebook_stats.failed += len(successful_results)
+                return notebook_stats
+
         for idx, result in enumerate(successful_results, 1):
             note = result.note
             upload_result, skip_reason = self._upload_single_note(note, idx, parse_stats.total, notebook_name, result)
@@ -189,6 +201,77 @@ class EnexUploader(object):
                 notebook_stats.failed += 1
 
         return notebook_stats
+
+    @staticmethod
+    def _normalized_updated(value: str | datetime) -> datetime | None:
+        try:
+            updated = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=UTC)
+            return updated.astimezone(UTC)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _signature(cls, title: str, updated: str | datetime) -> tuple[str, datetime] | None:
+        normalized_updated = cls._normalized_updated(updated)
+        if not title or normalized_updated is None:
+            return None
+        return title, normalized_updated
+
+    @staticmethod
+    def _property_text(value: dict) -> str:
+        return "".join(
+            item.get("plain_text", item.get("text", {}).get("content", ""))
+            for item in value.get("title", [])
+        )
+
+    def _load_existing_signatures(self):
+        self.existing_signatures.clear()
+        if self.mode == "DB":
+            pages = self.wrapper.list_database_pages(self.notebook_root)
+            schema = self.notebook_schema or {}
+            title_name = next(
+                (name for name, prop in schema.items() if prop.get("type") == "title" or "title" in prop),
+                None,
+            )
+            updated_name = next(
+                (name for name, prop in schema.items() if name.lower() == "updated" and (prop.get("type") == "date" or "date" in prop)),
+                None,
+            )
+            if title_name is None or updated_name is None:
+                return
+            for page in pages:
+                properties = page.get("properties", {})
+                title = self._property_text(properties.get(title_name, {}))
+                updated = properties.get(updated_name, {}).get("date", {}).get("start")
+                signature = self._signature(title, updated) if updated else None
+                if signature:
+                    self.existing_signatures.add(signature)
+            return
+
+        for block in self.wrapper.get_blocks(self.notebook_root):
+            if block.get("type") != "child_page":
+                continue
+            title = block.get("child_page", {}).get("title", "")
+            updated = self._find_page_updated(block.get("_children", []))
+            signature = self._signature(title, updated) if updated else None
+            if signature:
+                self.existing_signatures.add(signature)
+
+    @classmethod
+    def _find_page_updated(cls, blocks: list[dict]) -> str | None:
+        for block in blocks:
+            block_type = block.get("type")
+            if block_type == "callout":
+                text = cls._property_text({"title": block.get("callout", {}).get("rich_text", [])})
+                match = re.search(r"(?:^|\n)Updated:\s*(.+)", text)
+                if match:
+                    return match.group(1).strip()
+            updated = cls._find_page_updated(block.get("_children", []))
+            if updated:
+                return updated
+        return None
 
     def _upload_single_note(
         self, note: EvernoteNote, note_idx: int, total_notes: int, notebook_name: str, parse_result
@@ -203,6 +286,13 @@ class EnexUploader(object):
         if note.note_hash in self.done_hashes:
             skip_reason = "Already uploaded (found in done file)"
             logger.debug(f"Skipping note '{note.title}' ({skip_reason})")
+            return "skipped", skip_reason
+
+        effective_title = note.title if note.title and note.title.strip() else "[Untitled Note]"
+        signature = self._signature(effective_title, note.updated)
+        if self.skip_existing and signature in self.existing_signatures:
+            skip_reason = "An existing page has the same title and ENEX updated date"
+            logger.info(f"Skipping note '{effective_title}' ({skip_reason})")
             return "skipped", skip_reason
 
         # Add custom tag if specified
@@ -228,6 +318,8 @@ class EnexUploader(object):
         try:
             page_id, has_errors, updated_errors, failed_uploads, user_action_blocks = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
             self.done_hashes.add(note.note_hash)
+            if signature:
+                self.existing_signatures.add(signature)
             
             # Track partial import in exception summary page
             # Filter out user-actionable errors (they go in the User Action Required database instead)

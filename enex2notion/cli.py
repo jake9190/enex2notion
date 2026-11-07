@@ -121,7 +121,8 @@ def _upload_cli(args):
 
     enex_uploader = EnexUploader(
         wrapper=wrapper, root_id=root_id, mode=args.mode, done_file=args.done_file, rules=rules, 
-        rejected_tracker=rejected_tracker, unsupported_dir=unsupported_dir, working_dir=ops_dir
+        rejected_tracker=rejected_tracker, unsupported_dir=unsupported_dir, working_dir=ops_dir,
+        skip_existing=args.skip_existing
     )
 
     # Track overall import statistics

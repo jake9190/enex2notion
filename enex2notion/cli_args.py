@@ -148,6 +148,10 @@ def parse_args(argv):
                 " makes sense only with PAGE mode"
             ),
         },
+        "--skip-existing": {
+            "action": "store_true",
+            "help": "skip pages whose title and ENEX updated date match an existing page",
+        },
         "--reimport": {
             "action": "store_true",
             "help": "replace previously imported notes in place; skip missing or ambiguous matches",
@@ -268,6 +272,8 @@ def parse_args(argv):
 
     if (args.whatif or args.skip_edited_after or args.skip_changed_since_import) and not args.reimport:
         parser.error("--whatif and edit safeguards require --reimport")
+    if args.skip_existing and args.reimport:
+        parser.error("--skip-existing cannot be combined with --reimport")
     if args.notebook_id and not args.reimport:
         parser.error("--notebook-id requires --reimport")
     if args.allow_importer_last_edit and not args.skip_changed_since_import:

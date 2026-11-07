@@ -108,6 +108,14 @@ $ enex2notion
 
 ## Usage
 
+### Skipping Existing Pages
+
+Use `--skip-existing` during a normal import to skip a note only when the selected
+notebook already contains a page with the same title and ENEX updated date. In
+`DB` mode, matching uses the database's title and `Updated` date properties. In
+`PAGE` mode, existing pages need imported metadata (for example, use `--add-meta`)
+to compare the ENEX updated date. This option cannot be combined with `--reimport`.
+
 ### Re-import Existing Notes
 
 Re-import updates note content in the **same Notion page**, retaining its page ID
@@ -276,6 +284,7 @@ options:
   --root-page NAME           root page name for the imported notebooks, it will be created if it does not exist (default: "Evernote ENEX Import")
   --mode {DB,PAGE}           upload each ENEX as database (DB) or page with children (PAGE) (default: DB)
   --add-meta                 include metadata (created, tags, etc) in notes, makes sense only with PAGE mode
+  --skip-existing            skip pages with matching title and ENEX updated date
   --tag TAG                  add custom tag to uploaded notes
   --condense-lines           condense text lines together into paragraphs to avoid making block per line
   --condense-lines-sparse    like --condense-lines but leaves gaps between paragraphs

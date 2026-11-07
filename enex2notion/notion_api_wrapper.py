@@ -422,6 +422,44 @@ class NotionAPIWrapper:
         time.sleep(self._rate_limit_delay)
         return self._retry_on_rate_limit(self.client.databases.retrieve, database_id=database_id)
 
+    def list_database_pages(self, database_id: str) -> list[dict[str, Any]]:
+        """Return all direct pages in a database, preserving their properties."""
+        pages = []
+        start_cursor = None
+
+        while True:
+            time.sleep(self._rate_limit_delay)
+            payload = {"page_size": 100}
+            if start_cursor:
+                payload["start_cursor"] = start_cursor
+
+            def _query_database():
+                response = requests.post(
+                    f"https://api.notion.com/v1/databases/{database_id}/query",
+                    headers={
+                        "Authorization": f"Bearer {self._auth_token}",
+                        "Content-Type": "application/json",
+                        "Notion-Version": NOTION_API_VERSION,
+                    },
+                    json=payload,
+                    timeout=30,
+                )
+                if response.status_code != 200:
+                    try:
+                        message = response.json().get("message", response.text)
+                    except ValueError:
+                        message = response.text
+                    raise requests.HTTPError(
+                        f"Database query failed (HTTP {response.status_code}): {message}"
+                    )
+                return response
+
+            data = self._retry_on_rate_limit(_query_database).json()
+            pages.extend(data.get("results", []))
+            if not data.get("has_more"):
+                return pages
+            start_cursor = data.get("next_cursor")
+
     def get_blocks(self, block_id: str, page_size: int = 100) -> list[dict[str, Any]]:
         """Retrieve all blocks from a page/block with pagination.
 
