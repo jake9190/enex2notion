@@ -8,12 +8,15 @@ that silently drops the 'properties' parameter.
 """
 import logging
 import time
-from typing import Any, Callable
-import requests
-from requests.exceptions import Timeout, ConnectionError
+from collections.abc import Callable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from typing import Any
 
+import requests
 from notion_client import Client
 from notion_client.errors import APIResponseError
+from requests.exceptions import ConnectionError, Timeout
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +93,8 @@ class NotionAPIWrapper:
     def _retry_on_rate_limit(self, func, *args, **kwargs):
         """Retry a function with exponential backoff ONLY on rate limit errors (429).
         
-        Uses progressive backoff: 1s, 2s, 4s, then 5min intervals.
-        Gives up after 25 minutes total wait time.
+        Honors the server's Retry-After header when present; otherwise uses progressive
+        backoff of 1s, 2s, 4s, then 5min intervals. Gives up after 25 minutes total wait time.
         
         Other errors (timeouts, connection issues, 500s, etc.) are raised immediately
         and should be handled by the caller if retry is desired.
@@ -118,17 +121,33 @@ class NotionAPIWrapper:
             except APIResponseError as e:
                 error_msg = str(e).lower()
                 # ONLY retry on rate limit errors (429)
-                is_rate_limit = "rate limit" in error_msg or "429" in error_msg
+                is_rate_limit = getattr(e, "status", None) == 429 or "rate limit" in error_msg or "429" in error_msg
                 
                 if not is_rate_limit:
                     # Not a rate limit error - raise immediately for caller to handle
                     raise
                 
-                # Calculate wait time: 1s, 2s, 4s, then 5min, 5min, 5min
-                if attempt < 3:
-                    wait_time = 2 ** attempt  # 1s, 2s, 4s
-                else:
-                    wait_time = 300  # 5 minutes
+                # Prefer the server's Retry-After value; otherwise use progressive backoff.
+                headers = getattr(e, "headers", {}) or {}
+                retry_after = headers.get("Retry-After") or headers.get("retry-after")
+                wait_time = None
+                if retry_after is not None:
+                    try:
+                        wait_time = max(0, float(retry_after))
+                    except (TypeError, ValueError):
+                        try:
+                            retry_at = parsedate_to_datetime(retry_after)
+                            if retry_at.tzinfo is None:
+                                retry_at = retry_at.replace(tzinfo=UTC)
+                            wait_time = max(0, (retry_at - datetime.now(UTC)).total_seconds())
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+
+                if wait_time is None:
+                    if attempt < 3:
+                        wait_time = 2 ** attempt  # 1s, 2s, 4s
+                    else:
+                        wait_time = 300  # 5 minutes
                 
                 # Check if we would exceed max wait time
                 if total_wait_time + wait_time > self._max_wait_time:
@@ -148,16 +167,16 @@ class NotionAPIWrapper:
                     raise
                 
                 # Log warning and wait
-                wait_min = wait_time / 60
+                wait_description = f"{wait_time:.0f} seconds" if wait_time < 60 else f"{wait_time / 60:.1f} minutes"
                 logger.warning(
                     f"Rate limited by Notion API (attempt {attempt + 1}/{self._max_retries}). "
-                    f"Waiting {wait_min:.1f} minute{'s' if wait_min != 1 else ''} before retry..."
+                    f"Waiting {wait_description} before retry..."
                 )
                 time.sleep(wait_time)
                 total_wait_time += wait_time
         
         # Should never reach here, but just in case
-        raise APIResponseError(429, "Max retries exhausted", {})
+        raise APIResponseError("rate_limited", 429, "Max retries exhausted", {}, "")
 
     def search_pages(self, title: str, include_databases: bool = False) -> list[dict[str, Any]]:
         """Search for pages and optionally databases by title.
@@ -862,6 +881,23 @@ class NotionAPIWrapper:
                 logger.warning(f"Failed to query database {database_id}: {e}")
                 break
 
+    @staticmethod
+    def _check_file_upload_response(response, operation: str):
+        if response.status_code == 200:
+            return response
+
+        try:
+            error_data = response.json() if response.text else {}
+        except ValueError:
+            error_data = {}
+        error_msg = error_data.get("message", response.text)
+        message = f"{operation} (HTTP {response.status_code}): {error_msg}"
+        if response.status_code == 429:
+            raise APIResponseError(
+                "rate_limited", response.status_code, message, response.headers, response.text
+            )
+        raise requests.HTTPError(message)
+
     def upload_file(self, file_data: bytes, filename: str, mime_type: str) -> str:
         """Upload file to Notion using Direct Upload API.
 
@@ -930,11 +966,7 @@ class NotionAPIWrapper:
                 },
                 timeout=30,
             )
-            if response.status_code != 200:
-                error_data = response.json() if response.text else {}
-                error_msg = error_data.get("message", response.text)
-                raise Exception(f"Failed to create file upload (HTTP {response.status_code}): {error_msg}")
-            return response
+            return self._check_file_upload_response(response, "Failed to create file upload")
         
         create_response = self._retry_on_rate_limit(_create_upload)
         
@@ -959,19 +991,16 @@ class NotionAPIWrapper:
             "Notion-Version": NOTION_API_VERSION,
         }
         
-        send_response = requests.post(
-            f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
-            headers=send_headers,
-            files={"file": (filename, file_data, mime_type)},
-            timeout=300,  # 5 minutes
-        )
-        
-        if send_response.status_code != 200:
-            error_data = send_response.json() if send_response.text else {}
-            error_msg = error_data.get("message", send_response.text)
-            raise Exception(
-                f"Failed to send file contents (HTTP {send_response.status_code}): {error_msg}"
+        def _send_file_contents():
+            response = requests.post(
+                f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
+                headers=send_headers,
+                files={"file": (filename, file_data, mime_type)},
+                timeout=300,  # 5 minutes
             )
+            return self._check_file_upload_response(response, "Failed to send file contents")
+
+        self._retry_on_rate_limit(_send_file_contents)
         
         logger.debug(f"  File uploaded successfully")
         return upload_id
@@ -1016,11 +1045,7 @@ class NotionAPIWrapper:
                 },
                 timeout=30,
             )
-            if response.status_code != 200:
-                error_data = response.json() if response.text else {}
-                error_msg = error_data.get("message", response.text)
-                raise Exception(f"Failed to create multi-part upload (HTTP {response.status_code}): {error_msg}")
-            return response
+            return self._check_file_upload_response(response, "Failed to create multi-part upload")
         
         create_response = self._retry_on_rate_limit(_create_multipart)
         
@@ -1057,20 +1082,19 @@ class NotionAPIWrapper:
             logger.debug(f"  Uploading part {part_num + 1}/{num_chunks} ({len(chunk_data)} bytes)")
             time.sleep(self._rate_limit_delay)
             
-            send_response = requests.post(
-                f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
-                headers=send_headers,
-                json={"part_number": part_num},
-                files={"file": (filename, chunk_data, mime_type)},
-                timeout=300,
-            )
-            
-            if send_response.status_code != 200:
-                error_data = send_response.json() if send_response.text else {}
-                error_msg = error_data.get("message", send_response.text)
-                raise Exception(
-                    f"Failed to send part {part_num + 1} (HTTP {send_response.status_code}): {error_msg}"
+            def _send_part(part_num=part_num, chunk_data=chunk_data):
+                response = requests.post(
+                    f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
+                    headers=send_headers,
+                    json={"part_number": part_num},
+                    files={"file": (filename, chunk_data, mime_type)},
+                    timeout=300,
                 )
+                return self._check_file_upload_response(
+                    response, f"Failed to send part {part_num + 1}"
+                )
+
+            self._retry_on_rate_limit(_send_part)
         
         logger.debug(f"  All {num_chunks} parts uploaded")
         
@@ -1085,11 +1109,7 @@ class NotionAPIWrapper:
                 json={},  # Empty body required
                 timeout=30,
             )
-            if response.status_code != 200:
-                error_data = response.json() if response.text else {}
-                error_msg = error_data.get("message", response.text)
-                raise Exception(f"Failed to complete upload (HTTP {response.status_code}): {error_msg}")
-            return response
+            return self._check_file_upload_response(response, "Failed to complete upload")
         
         complete_response = self._retry_on_rate_limit(_complete_multipart)
         

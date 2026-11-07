@@ -43,6 +43,37 @@ def test_file_send_uses_content_type_from_creation(mocker, method, creation_fiel
     assert sends == [("photo.png", file_data, expected_type)]
 
 
+@pytest.mark.parametrize("rate_limited_stage", ["create", "send"])
+def test_singlepart_upload_retries_429_and_honors_retry_after(mocker, rate_limited_stage):
+    calls = []
+    sleeps = []
+    rate_limit_returned = False
+
+    def post(url, **options):
+        nonlocal rate_limit_returned
+        stage = "send" if url.endswith("/send") else "create"
+        calls.append(stage)
+        if stage == rate_limited_stage and not rate_limit_returned:
+            rate_limit_returned = True
+            return httpx.Response(
+                429,
+                json={"message": "You have been rate limited."},
+                headers={"Retry-After": "2"},
+            )
+        if stage == "create":
+            return httpx.Response(200, json={"id": "upload"})
+        return httpx.Response(200, json={"status": "uploaded"})
+
+    mocker.patch("enex2notion.notion_api_wrapper.requests.post", side_effect=post)
+    mocker.patch("enex2notion.notion_api_wrapper.time.sleep", side_effect=sleeps.append)
+    wrapper = NotionAPIWrapper("test-token")
+    wrapper._rate_limit_delay = 0
+
+    assert wrapper._upload_file_singlepart(b"image", "photo.png", "image/png") == "upload"
+    assert calls.count(rate_limited_stage) == 2
+    assert 2 in sleeps
+
+
 def test_generic_enex_file_gets_upload_id_with_notion_image_content_type(mocker):
     file_data = b"\x89PNG\r\n\x1a\nimage bytes"
     resource = EvernoteResource(file_data, len(file_data), "hash", "application/octet-stream", "photo.png")
