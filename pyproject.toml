@@ -30,6 +30,9 @@ Issues = "https://github.com/CameronBeeler/enex2notion/issues"
 [project.scripts]
 enex2notion = "enex2notion.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["enex2notion*"]
+
 [tool.black]
 line-length = 120
 
