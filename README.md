@@ -196,6 +196,42 @@ equal to the authenticated integration's user ID, not merely the display name
 a recorded baseline and never overrides a changed baseline or date cutoff.
 This is a heuristic: an integration edit can follow an earlier human edit, so it
 does not prove the absence of human changes. Review the preview before applying.
+Recreating an integration can change its user ID, so an older import may fail
+this check even when Notion still displays the same editor name.
+
+To explicitly whitelist an older integration or another editor by name:
+
+```shell
+python -m enex2notion Notebook.enex --use-env --reimport --whatif 5 --skip-changed-since-import --allow-last-editor "enex2notion" --operations-dir ./operations
+```
+
+Repeat `--allow-last-editor NAME` for multiple allowed editors. The importer
+retrieves each page/block editor by ID and requires an exact, case-sensitive
+name match for **every nested block** and the page. Missing editors, failed user
+lookups, and unlisted names are rejected. Names are not unique: this is an
+explicit trust heuristic, not proof that the original integration made the edit.
+Like the ID-based fallback, it can allow later edits by whitelisted editors and
+cannot rule out earlier edits by others.
+
+Alternatively, allow only an initial five-second creation/edit window:
+
+```shell
+python -m enex2notion Notebook.enex --use-env --reimport --whatif 5 --skip-changed-since-import --allow-initial-edit-window 5 --operations-dir ./operations
+```
+
+`--allow-initial-edit-window SECONDS` accepts a positive integer. The page and
+all nested blocks must have no edit later than the Notion page's `created_time`
+plus that window; equality is allowed and full timestamp precision is used.
+This uses Notion creation metadata, not the Evernote `Created` property, and
+does not depend on editor identity or an import tag. Missing/invalid creation
+metadata is rejected. A long initial import may exceed the window, while human
+edits inside it cannot be distinguished from import activity.
+
+All three fallbacks require `--skip-changed-since-import`, apply only without a
+recorded baseline, and never override a changed baseline or date cutoff. If
+combined, **any** matching fallback can allow the note. Use the window alone
+when later edits must be skipped regardless of editor. Preview output identifies
+the fallback used. Successful re-imports save a baseline for future runs.
 
 `missing or ambiguous notebook` is a discovery problem, not an edit-protection
 decision. Re-import now pins search to the same database-compatible Notion API

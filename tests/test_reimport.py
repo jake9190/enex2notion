@@ -1,7 +1,7 @@
 import copy
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -622,7 +622,194 @@ def test_fallback_verifies_integration_id_not_display_name(importer):
     assert importer.importer_id == "real-bot"
 
 
-@pytest.mark.parametrize("options", [["--allow-importer-last-edit"], ["--notebook-id", "db"]])
+@pytest.mark.parametrize(
+    "edited,expected",
+    [
+        ("2026-09-01T00:00:00Z", "replace"),
+        ("2026-09-01T00:00:05Z", "replace"),
+        ("2026-08-31T20:00:05-04:00", "replace"),
+        ("2026-09-01T00:00:05.001Z", "skip"),
+        ("2026-09-01T00:01:00Z", "skip"),
+    ],
+)
+def test_initial_edit_window(importer, edited, expected):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_initial_edit_window = 5
+    snapshot = make_snapshot(edited=edited)
+    snapshot["page"]["created_time"] = "2026-09-01T00:00:00Z"
+    importer.remote.snapshot.return_value = snapshot
+    plan = make_plan(importer)
+    assert plan["action"] == expected
+    if expected == "replace":
+        assert plan["initial_window_fallback"] is True
+        importer.display("Note", plan)
+        assert any("within 5s" in call.args[0] for call in importer.output.call_args_list)
+    importer.remote.call.assert_not_called()
+
+
+@pytest.mark.parametrize("created", [None, "invalid", "2026-09-01T00:00:00"])
+def test_initial_edit_window_requires_valid_creation_time(importer, created):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_initial_edit_window = 5
+    snapshot = make_snapshot()
+    if created is not None:
+        snapshot["page"]["created_time"] = created
+    importer.remote.snapshot.return_value = snapshot
+    assert make_plan(importer)["action"] == "skip"
+
+
+def test_initial_edit_window_checks_nested_edits_and_preserves_safeguards(importer):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_initial_edit_window = 5
+    snapshot = make_snapshot()
+    snapshot["page"]["created_time"] = "2026-09-01T00:00:00Z"
+    snapshot["blocks"][0]["_children"] = [
+        {
+            "id": "child",
+            "type": "paragraph",
+            "last_edited_time": "2026-09-01T00:00:06Z",
+            "paragraph": {"rich_text": []},
+        }
+    ]
+    importer.remote.snapshot.return_value = snapshot
+    assert make_plan(importer)["action"] == "skip"
+    snapshot["blocks"][0]["_children"][0]["last_edited_time"] = "2026-09-01T00:00:05Z"
+    assert make_plan(importer)["action"] == "replace"
+    importer.args.skip_edited_after = datetime(2026, 9, 1, tzinfo=UTC)
+    assert make_plan(importer)["action"] == "skip"
+    importer.args.skip_edited_after = None
+    importer.state.record("notebook", make_note(), make_snapshot(edited="2026-08-01T00:00:00Z"))
+    assert make_plan(importer)["action"] == "skip"
+
+
+def test_named_editor_fallback_resolves_old_integration_and_caches(importer):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_last_editor = ["enex2notion", "Trusted editor"]
+    importer.args.allow_importer_last_edit = True
+    snapshot = make_snapshot()
+    for value in [snapshot["page"], *snapshot["blocks"]]:
+        value["last_edited_by"] = {"id": "old-bot"}
+    snapshot["blocks"][0]["_children"] = [
+        {
+            "id": "child",
+            "type": "paragraph",
+            "last_edited_time": "2026-09-01T00:00:00Z",
+            "last_edited_by": {"id": "trusted-user"},
+            "paragraph": {"rich_text": []},
+        }
+    ]
+    importer.remote.snapshot.return_value = snapshot
+    importer.remote.call.side_effect = lambda function, user_id: {
+        "id": user_id,
+        "name": "enex2notion" if user_id == "old-bot" else "Trusted editor",
+    }
+    plan = make_plan(importer)
+    assert plan["action"] == "replace"
+    assert plan["named_editor_fallback"] is True
+    assert plan["editor_fallback"] is False
+    assert importer.importer_id is None
+    assert make_plan(importer)["action"] == "replace"
+    assert importer.remote.call.call_count == 2
+    importer.display("Note", plan)
+    assert any("names are not unique" in call.args[0] for call in importer.output.call_args_list)
+    importer.args.skip_edited_after = datetime(2026, 8, 1, tzinfo=UTC)
+    assert make_plan(importer)["action"] == "skip"
+    importer.args.skip_edited_after = None
+    importer.state.record("notebook", make_note(), make_snapshot(edited="2026-08-01T00:00:00Z"))
+    assert make_plan(importer)["action"] == "skip"
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"id": "old-bot", "name": "Enex2notion"},
+        {"id": "different-bot", "name": "enex2notion"},
+        {"id": "old-bot"},
+        RuntimeError("User unavailable"),
+    ],
+)
+def test_named_editor_fallback_rejects_unverified_names(importer, user):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_last_editor = ["enex2notion"]
+    snapshot = make_snapshot()
+    for value in [snapshot["page"], *snapshot["blocks"]]:
+        value["last_edited_by"] = {"id": "old-bot", "name": "enex2notion"}
+    importer.remote.snapshot.return_value = snapshot
+    if isinstance(user, Exception):
+        importer.remote.call.side_effect = user
+    else:
+        importer.remote.call.return_value = user
+    assert make_plan(importer)["action"] == "skip"
+
+
+def test_named_editor_fallback_requires_every_nested_editor(importer):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_last_editor = ["enex2notion"]
+    snapshot = make_snapshot()
+    for value in [snapshot["page"], *snapshot["blocks"]]:
+        value["last_edited_by"] = {"id": "old-bot"}
+    child = {
+        "id": "child",
+        "type": "paragraph",
+        "last_edited_time": "2026-09-01T00:00:00Z",
+        "paragraph": {"rich_text": []},
+    }
+    snapshot["blocks"][0]["_children"] = [child]
+    importer.remote.snapshot.return_value = snapshot
+    importer.remote.call.side_effect = lambda function, user_id: {
+        "id": user_id,
+        "name": "enex2notion" if user_id == "old-bot" else "Other editor",
+    }
+    assert make_plan(importer)["action"] == "skip"
+    child["last_edited_by"] = {"id": "human"}
+    assert make_plan(importer)["action"] == "skip"
+
+
+def test_initial_window_does_not_require_editor_identity(importer):
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_initial_edit_window = 5
+    importer.args.allow_last_editor = ["enex2notion"]
+    importer.args.allow_importer_last_edit = True
+    snapshot = make_snapshot()
+    snapshot["page"]["created_time"] = "2026-09-01T00:00:00Z"
+    importer.remote.snapshot.return_value = snapshot
+    assert make_plan(importer)["action"] == "replace"
+    importer.remote.call.assert_not_called()
+
+
+def test_new_fallback_options_parse():
+    args = parse_args(
+        [
+            "--token",
+            "test-token",
+            "--reimport",
+            "--skip-changed-since-import",
+            "--allow-initial-edit-window",
+            "5",
+            "--allow-last-editor",
+            "enex2notion",
+            "--allow-last-editor",
+            "Trusted editor",
+            "notes.enex",
+        ]
+    )
+    assert args.allow_initial_edit_window == 5
+    assert args.allow_last_editor == ["enex2notion", "Trusted editor"]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--allow-importer-last-edit"],
+        ["--notebook-id", "db"],
+        ["--allow-initial-edit-window", "5"],
+        ["--allow-last-editor", "enex2notion"],
+        ["--reimport", "--skip-changed-since-import", "--allow-initial-edit-window", "0"],
+        ["--reimport", "--skip-changed-since-import", "--allow-initial-edit-window", "-1"],
+        ["--reimport", "--skip-changed-since-import", "--allow-initial-edit-window", "5s"],
+        ["--reimport", "--skip-changed-since-import", "--allow-last-editor", " "],
+    ],
+)
 def test_new_options_require_explicit_safeguards(options):
     with pytest.raises(SystemExit):
         parse_args(["--token", "test-token", *options, "notes.enex"])
@@ -630,10 +817,22 @@ def test_new_options_require_explicit_safeguards(options):
 
 @pytest.mark.parametrize("parent_id,expected", [("root", "would replace"), ("other-root", "0 would replace")])
 def test_explicit_notebook_id_remains_root_scoped(tmp_path, mocker, capsys, parent_id, expected):
-    args = parse_args([
-        "--token", "test-token", "--reimport", "--whatif", "1", "--mode", "PAGE",
-        "--notebook-id", "notebook", "--operations-dir", str(tmp_path), "renamed-export.enex",
-    ])
+    args = parse_args(
+        [
+            "--token",
+            "test-token",
+            "--reimport",
+            "--whatif",
+            "1",
+            "--mode",
+            "PAGE",
+            "--notebook-id",
+            "notebook",
+            "--operations-dir",
+            str(tmp_path),
+            "renamed-export.enex",
+        ]
+    )
     wrapper = mocker.Mock()
     mocker.patch("enex2notion.cli_reimport.get_notion_wrapper", return_value=wrapper)
     remote = mocker.patch("enex2notion.cli_reimport.ImportRemote").return_value
@@ -641,9 +840,14 @@ def test_explicit_notebook_id_remains_root_scoped(tmp_path, mocker, capsys, pare
     remote.page.return_value = {"id": "notebook", "object": "page", "parent": {"page_id": parent_id}}
     remote.notebook_pages.return_value = [make_snapshot()["page"]]
     remote.snapshot.return_value = make_snapshot()
-    mocker.patch("enex2notion.cli_reimport.parse_all_notes", return_value=SimpleNamespace(results=[
-        SimpleNamespace(note=make_note(), failed=False),
-    ]))
+    mocker.patch(
+        "enex2notion.cli_reimport.parse_all_notes",
+        return_value=SimpleNamespace(
+            results=[
+                SimpleNamespace(note=make_note(), failed=False),
+            ]
+        ),
+    )
 
     reimport_command(args)
 
@@ -667,17 +871,31 @@ def attachment_note_and_snapshot(kind="pdf", mime="application/pdf", suffix="<di
     note = make_note(content=f'<en-media type="{mime}" hash="{digest}"/>{suffix}')
     note.resources = [resource]
     snapshot = make_snapshot()
-    snapshot["blocks"].insert(0, {
-        "id": "file-block", "type": kind, "last_edited_time": "2026-09-01T00:00:00Z",
-        kind: {"type": "file", "file": {"url": "https://prod-files-secure.s3.us-west-2.amazonaws.com/file.bin?signature=temporary"}},
-    })
+    snapshot["blocks"].insert(
+        0,
+        {
+            "id": "file-block",
+            "type": kind,
+            "last_edited_time": "2026-09-01T00:00:00Z",
+            kind: {
+                "type": "file",
+                "file": {"url": "https://prod-files-secure.s3.us-west-2.amazonaws.com/file.bin?signature=temporary"},
+            },
+        },
+    )
     return note, snapshot, (len(data), hashlib.sha256(data).hexdigest())
 
 
-@pytest.mark.parametrize("kind,mime", [
-    ("pdf", "application/pdf"), ("image", "image/png"), ("audio", "audio/mpeg"),
-    ("video", "video/mp4"), ("file", "application/octet-stream"),
-])
+@pytest.mark.parametrize(
+    "kind,mime",
+    [
+        ("pdf", "application/pdf"),
+        ("image", "image/png"),
+        ("audio", "audio/mpeg"),
+        ("video", "video/mp4"),
+        ("file", "application/octet-stream"),
+    ],
+)
 def test_verified_files_are_retained_beside_changed_text(importer, mocker, kind, mime):
     note, snapshot, digest = attachment_note_and_snapshot(kind, mime)
     importer.remote.snapshot.return_value = snapshot

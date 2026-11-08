@@ -1,9 +1,10 @@
 import copy
 import difflib
 import json
+import logging
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -12,13 +13,15 @@ from enex2notion.cli_notion import get_notion_wrapper
 from enex2notion.enex_parser import parse_all_notes
 from enex2notion.enex_uploader import _convert_note_blocks, _process_image_blocks, _upload_block_tree
 from enex2notion.import_state import (
-    ImportRemote, ImportState, belongs_to, edit_signature, latest_edit, object_title, same_id, write_json,
+    ImportRemote, ImportState, belongs_to, edit_signature, latest_edit, object_title, same_id, timestamp, write_json,
 )
 from enex2notion.note_parser.note import parse_note
 from enex2notion.notion_api_wrapper import note_to_database_properties
 from enex2notion.notion_blocks.uploadable import NotionUploadableBlock
 from enex2notion.reimport_attachments import FILE_TYPES, match_unchanged_blocks, walk_payload
 from enex2notion.utils_static import Rules
+
+logger = logging.getLogger(__name__)
 
 
 def comparison_url(url):
@@ -172,21 +175,43 @@ def preview_blocks(blocks):
     return _convert_note_blocks(prepared)
 
 
-def all_last_edited_by(snapshot, user_id):
+def all_last_editors_match(snapshot, predicate):
     def matches(value):
         editor_id = value.get("last_edited_by", {}).get("id")
-        return bool(editor_id) and same_id(editor_id, user_id) and all(
-            matches(child) for child in value.get("_children", [])
-        )
+        return bool(editor_id) and predicate(editor_id) and all(matches(child) for child in value.get("_children", []))
 
-    return bool(user_id) and matches(snapshot["page"]) and all(matches(block) for block in snapshot["blocks"])
+    return matches(snapshot["page"]) and all(matches(block) for block in snapshot["blocks"])
 
 
-def protection_reason(snapshot, record, cutoff, skip_changed, importer_id=None):
+def all_last_edited_by(snapshot, user_id):
+    return bool(user_id) and all_last_editors_match(snapshot, lambda editor_id: same_id(editor_id, user_id))
+
+
+def within_initial_edit_window(snapshot, seconds):
+    if seconds is None:
+        return False
+    try:
+        created = timestamp(snapshot["page"]["created_time"])
+        return created <= latest_edit(snapshot) <= created + timedelta(seconds=seconds)
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        return False
+
+
+def protection_reason(
+    snapshot,
+    record,
+    cutoff,
+    skip_changed,
+    importer_id=None,
+    initial_edit_window=None,
+    named_editor_fallback=False,
+):
     if cutoff and latest_edit(snapshot) > cutoff:
         return "edited in Notion after the cutoff"
     if skip_changed:
         if not record or not same_id(record["page_id"], snapshot["page"]["id"]):
+            if not record and (within_initial_edit_window(snapshot, initial_edit_window) or named_editor_fallback):
+                return None
             if importer_id and all_last_edited_by(snapshot, importer_id):
                 return None
             return "no recorded import baseline; cannot establish whether Notion was edited"
@@ -205,7 +230,25 @@ class Reimporter:
         self.state = ImportState(directory)
         self.output = output
         self.importer_id = None
+        self.editor_names = {}
         self.attachment_digests = {}
+
+    def whitelisted_last_editors(self, snapshot):
+
+        def matches(editor_id):
+            key = str(editor_id).replace("-", "")
+            if key not in self.editor_names:
+                try:
+                    user = self.remote.call(self.wrapper.client.users.retrieve, user_id=editor_id)
+                    self.editor_names[key] = user.get("name") if same_id(user.get("id"), editor_id) else None
+                except Exception:
+                    logger.warning(
+                        "Could not verify last-editor name for %s; rejecting name fallback", editor_id, exc_info=True
+                    )
+                    self.editor_names[key] = None
+            return self.editor_names[key] in self.args.allow_last_editor
+
+        return bool(self.args.allow_last_editor) and all_last_editors_match(snapshot, matches)
 
     def plan(self, note, notebook_id, pages, schema):
         record = self.state.get(notebook_id, note)
@@ -226,15 +269,36 @@ class Reimporter:
             return {"action": "skip", "reason": str(error)}
         if not belongs_to(snapshot["page"], notebook_id):
             return {"action": "skip", "reason": "page moved out of the selected notebook"}
-        editor_fallback = self.args.allow_importer_last_edit and not record
+        initial_window_fallback = (
+            self.args.skip_changed_since_import
+            and not record
+            and within_initial_edit_window(snapshot, self.args.allow_initial_edit_window)
+        )
+        named_editor_fallback = (
+            self.args.skip_changed_since_import
+            and not record
+            and not initial_window_fallback
+            and self.whitelisted_last_editors(snapshot)
+        )
+        editor_fallback = (
+            self.args.allow_importer_last_edit
+            and not record
+            and not initial_window_fallback
+            and not named_editor_fallback
+        )
         if editor_fallback and self.importer_id is None:
             identity = self.remote.call(self.wrapper.client.users.me)
             if identity.get("type") != "bot" or not identity.get("id"):
                 return {"action": "skip", "reason": "could not verify authenticated integration user ID"}
             self.importer_id = identity["id"]
         reason = protection_reason(
-            snapshot, record, self.args.skip_edited_after, self.args.skip_changed_since_import,
+            snapshot,
+            record,
+            self.args.skip_edited_after,
+            self.args.skip_changed_since_import,
             self.importer_id if editor_fallback else None,
+            self.args.allow_initial_edit_window,
+            named_editor_fallback,
         )
         if reason:
             return {"action": "skip", "reason": reason}
@@ -277,6 +341,8 @@ class Reimporter:
         return {
             "action": "unchanged" if before == after else "replace",
             "editor_fallback": editor_fallback,
+            "initial_window_fallback": initial_window_fallback,
+            "named_editor_fallback": named_editor_fallback,
             "snapshot": snapshot, "blocks": blocks, "properties": property_changes,
             "retained": retained, "proposed": proposed,
             "before": before, "after": after, "note": note, "notebook_id": notebook_id,
@@ -284,8 +350,15 @@ class Reimporter:
 
     def display(self, title, plan):
         self.output(f"{plan['action'].upper()}: {title}" + (f" ({plan['reason']})" if plan.get("reason") else ""))
+        if plan.get("initial_window_fallback"):
+            self.output(
+                f"  Allowed by initial-edit window: page and nested block edits are within "
+                f"{self.args.allow_initial_edit_window}s of Notion page creation; edits within that window cannot be ruled out."
+            )
         if plan.get("editor_fallback"):
             self.output("  Allowed by last-editor fallback: the integration last edited the page and all blocks; earlier human edits cannot be ruled out.")
+        if plan.get("named_editor_fallback"):
+            self.output("  Allowed by named-editor fallback: every last editor is whitelisted; names are not unique and earlier edits cannot be ruled out.")
         if plan["action"] != "replace":
             return
         kept = len(plan["retained"])

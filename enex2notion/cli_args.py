@@ -164,6 +164,17 @@ def parse_args(argv):
             "action": "store_true",
             "help": "with --skip-changed-since-import, allow unknown baselines only when the integration last edited the page and all blocks; cannot rule out earlier human edits",
         },
+        "--allow-last-editor": {
+            "action": "append",
+            "default": [],
+            "metavar": "NAME",
+            "help": "with --skip-changed-since-import, whitelist a last-editor name for unknown baselines (repeatable); names are not unique and earlier edits cannot be ruled out",
+        },
+        "--allow-initial-edit-window": {
+            "type": _positive_count,
+            "metavar": "SECONDS",
+            "help": "with --skip-changed-since-import, allow unknown baselines when page and nested block edits are within SECONDS of Notion page creation, regardless of editor",
+        },
         "--whatif": {
             "type": _positive_count,
             "metavar": "N",
@@ -278,6 +289,12 @@ def parse_args(argv):
         parser.error("--notebook-id requires --reimport")
     if args.allow_importer_last_edit and not args.skip_changed_since_import:
         parser.error("--allow-importer-last-edit requires --skip-changed-since-import")
+    if args.allow_initial_edit_window is not None and not args.skip_changed_since_import:
+        parser.error("--allow-initial-edit-window requires --skip-changed-since-import")
+    if args.allow_last_editor and not args.skip_changed_since_import:
+        parser.error("--allow-last-editor requires --skip-changed-since-import")
+    if any(not name.strip() for name in args.allow_last_editor):
+        parser.error("--allow-last-editor requires a nonempty name")
     if args.reimport and (args.resolve_links or args.retry_failed_links or args.check_duplicates):
         parser.error("--reimport cannot be combined with link or duplicate commands")
     if args.reimport and args.dry_run:
