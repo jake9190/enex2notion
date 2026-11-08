@@ -205,12 +205,15 @@ def protection_reason(
     importer_id=None,
     initial_edit_window=None,
     named_editor_fallback=False,
+    id_editor_fallback=False,
 ):
     if cutoff and latest_edit(snapshot) > cutoff:
         return "edited in Notion after the cutoff"
     if skip_changed:
         if not record or not same_id(record["page_id"], snapshot["page"]["id"]):
-            if not record and (within_initial_edit_window(snapshot, initial_edit_window) or named_editor_fallback):
+            if not record and (
+                within_initial_edit_window(snapshot, initial_edit_window) or named_editor_fallback or id_editor_fallback
+            ):
                 return None
             if importer_id and all_last_edited_by(snapshot, importer_id):
                 return None
@@ -241,9 +244,14 @@ class Reimporter:
                 try:
                     user = self.remote.call(self.wrapper.client.users.retrieve, user_id=editor_id)
                     self.editor_names[key] = user.get("name") if same_id(user.get("id"), editor_id) else None
-                except Exception:
+                except Exception as error:
+                    logger.debug("Last-editor name lookup failed for %s", editor_id, exc_info=True)
                     logger.warning(
-                        "Could not verify last-editor name for %s; rejecting name fallback", editor_id, exc_info=True
+                        "Could not verify last-editor name for %s; rejecting name fallback: %s. "
+                        "If this editor is trusted, use --allow-last-editor-id %s to avoid user lookups.",
+                        editor_id,
+                        error,
+                        editor_id,
                     )
                     self.editor_names[key] = None
             return self.editor_names[key] in self.args.allow_last_editor
@@ -274,10 +282,21 @@ class Reimporter:
             and not record
             and within_initial_edit_window(snapshot, self.args.allow_initial_edit_window)
         )
+        id_editor_fallback = (
+            self.args.skip_changed_since_import
+            and not record
+            and not initial_window_fallback
+            and bool(self.args.allow_last_editor_id)
+            and all_last_editors_match(
+                snapshot,
+                lambda editor_id: any(same_id(editor_id, trusted_id) for trusted_id in self.args.allow_last_editor_id),
+            )
+        )
         named_editor_fallback = (
             self.args.skip_changed_since_import
             and not record
             and not initial_window_fallback
+            and not id_editor_fallback
             and self.whitelisted_last_editors(snapshot)
         )
         editor_fallback = (
@@ -285,6 +304,7 @@ class Reimporter:
             and not record
             and not initial_window_fallback
             and not named_editor_fallback
+            and not id_editor_fallback
         )
         if editor_fallback and self.importer_id is None:
             identity = self.remote.call(self.wrapper.client.users.me)
@@ -299,6 +319,7 @@ class Reimporter:
             self.importer_id if editor_fallback else None,
             self.args.allow_initial_edit_window,
             named_editor_fallback,
+            id_editor_fallback,
         )
         if reason:
             return {"action": "skip", "reason": reason}
@@ -343,6 +364,7 @@ class Reimporter:
             "editor_fallback": editor_fallback,
             "initial_window_fallback": initial_window_fallback,
             "named_editor_fallback": named_editor_fallback,
+            "id_editor_fallback": id_editor_fallback,
             "snapshot": snapshot, "blocks": blocks, "properties": property_changes,
             "retained": retained, "proposed": proposed,
             "before": before, "after": after, "note": note, "notebook_id": notebook_id,
@@ -357,6 +379,11 @@ class Reimporter:
             )
         if plan.get("editor_fallback"):
             self.output("  Allowed by last-editor fallback: the integration last edited the page and all blocks; earlier human edits cannot be ruled out.")
+        if plan.get("id_editor_fallback"):
+            self.output(
+                "  Allowed by editor-ID fallback: the page and all nested blocks have trusted last-editor IDs; "
+                "later edits by trusted editors and earlier edits by others cannot be ruled out."
+            )
         if plan.get("named_editor_fallback"):
             self.output("  Allowed by named-editor fallback: every last editor is whitelisted; names are not unique and earlier edits cannot be ruled out.")
         if plan["action"] != "replace":

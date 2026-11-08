@@ -777,6 +777,86 @@ def test_initial_window_does_not_require_editor_identity(importer):
     importer.remote.call.assert_not_called()
 
 
+def test_editor_id_fallback_without_user_lookup(importer):
+    trusted = "3b53f7bc-a447-8135-9613-002700121564"
+    other = "3d53f7bc-a447-811c-814e-0027f95492bc"
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_last_editor_id = [trusted, other]
+    importer.args.allow_last_editor = ["enex2notion"]
+    importer.args.allow_importer_last_edit = True
+    snapshot = make_snapshot()
+    for value in [snapshot["page"], *snapshot["blocks"]]:
+        value["last_edited_by"] = {"id": trusted.replace("-", "")}
+    snapshot["blocks"][0]["_children"] = [
+        {
+            "id": "child",
+            "type": "paragraph",
+            "last_edited_time": "2026-09-01T00:00:00Z",
+            "last_edited_by": {"id": other},
+            "paragraph": {"rich_text": []},
+        }
+    ]
+    importer.remote.snapshot.return_value = snapshot
+    importer.remote.call.side_effect = RuntimeError(
+        "Personal access tokens can only retrieve their own authorized user."
+    )
+    plan = make_plan(importer)
+    assert plan["action"] == "replace"
+    assert plan["id_editor_fallback"] is True
+    assert plan["named_editor_fallback"] is False
+    assert plan["editor_fallback"] is False
+    importer.remote.call.assert_not_called()
+    importer.display("Note", plan)
+    assert any("editor-ID fallback" in call.args[0] for call in importer.output.call_args_list)
+    importer.args.skip_edited_after = datetime(2026, 8, 1, tzinfo=UTC)
+    assert make_plan(importer)["action"] == "skip"
+    importer.args.skip_edited_after = None
+    importer.state.record("notebook", make_note(), make_snapshot(edited="2026-08-01T00:00:00Z"))
+    assert make_plan(importer)["action"] == "skip"
+    importer.remote.call.assert_not_called()
+
+
+@pytest.mark.parametrize("location", ["page", "block", "child"])
+@pytest.mark.parametrize("editor", [None, "unlisted-user"])
+def test_editor_id_fallback_rejects_missing_or_unlisted_editors(importer, location, editor):
+    trusted = "3b53f7bc-a447-8135-9613-002700121564"
+    importer.args.skip_changed_since_import = True
+    importer.args.allow_last_editor_id = [trusted]
+    snapshot = make_snapshot()
+    child = {
+        "id": "child",
+        "type": "paragraph",
+        "last_edited_time": "2026-09-01T00:00:00Z",
+        "paragraph": {"rich_text": []},
+    }
+    snapshot["blocks"][0]["_children"] = [child]
+    values = {"page": snapshot["page"], "block": snapshot["blocks"][0], "child": child}
+    for value in values.values():
+        value["last_edited_by"] = {"id": trusted}
+    values[location]["last_edited_by"] = {"id": editor}
+    importer.remote.snapshot.return_value = snapshot
+    assert make_plan(importer)["action"] == "skip"
+    importer.remote.call.assert_not_called()
+
+
+def test_editor_id_options_parse():
+    trusted = "3b53f7bc-a447-8135-9613-002700121564"
+    args = parse_args(
+        [
+            "--token",
+            "test-token",
+            "--reimport",
+            "--skip-changed-since-import",
+            "--allow-last-editor-id",
+            trusted.replace("-", ""),
+            "--allow-last-editor-id",
+            trusted,
+            "notes.enex",
+        ]
+    )
+    assert args.allow_last_editor_id == [trusted, trusted]
+
+
 def test_new_fallback_options_parse():
     args = parse_args(
         [
@@ -804,6 +884,9 @@ def test_new_fallback_options_parse():
         ["--notebook-id", "db"],
         ["--allow-initial-edit-window", "5"],
         ["--allow-last-editor", "enex2notion"],
+        ["--allow-last-editor-id", "3b53f7bc-a447-8135-9613-002700121564"],
+        ["--reimport", "--skip-changed-since-import", "--allow-last-editor-id", "invalid"],
+        ["--reimport", "--skip-changed-since-import", "--allow-last-editor-id", " "],
         ["--reimport", "--skip-changed-since-import", "--allow-initial-edit-window", "0"],
         ["--reimport", "--skip-changed-since-import", "--allow-initial-edit-window", "-1"],
         ["--reimport", "--skip-changed-since-import", "--allow-initial-edit-window", "5s"],

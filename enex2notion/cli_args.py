@@ -2,6 +2,7 @@ import argparse
 import os
 from datetime import datetime
 from pathlib import Path
+from uuid import UUID
 
 from enex2notion.version import __version__
 
@@ -13,6 +14,13 @@ def _positive_count(value):
     if count < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
     return count
+
+
+def _editor_id(value):
+    try:
+        return str(UUID(value))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("use a valid Notion user UUID") from error
 
 
 def _aware_datetime(value):
@@ -170,6 +178,13 @@ def parse_args(argv):
             "metavar": "NAME",
             "help": "with --skip-changed-since-import, whitelist a last-editor name for unknown baselines (repeatable); names are not unique and earlier edits cannot be ruled out",
         },
+        "--allow-last-editor-id": {
+            "action": "append",
+            "default": [],
+            "type": _editor_id,
+            "metavar": "ID",
+            "help": "with --skip-changed-since-import, trust a last-editor user ID for unknown baselines without user lookups (repeatable); later edits by trusted editors may be allowed",
+        },
         "--allow-initial-edit-window": {
             "type": _positive_count,
             "metavar": "SECONDS",
@@ -293,6 +308,8 @@ def parse_args(argv):
         parser.error("--allow-initial-edit-window requires --skip-changed-since-import")
     if args.allow_last_editor and not args.skip_changed_since_import:
         parser.error("--allow-last-editor requires --skip-changed-since-import")
+    if args.allow_last_editor_id and not args.skip_changed_since_import:
+        parser.error("--allow-last-editor-id requires --skip-changed-since-import")
     if any(not name.strip() for name in args.allow_last_editor):
         parser.error("--allow-last-editor requires a nonempty name")
     if args.reimport and (args.resolve_links or args.retry_failed_links or args.check_duplicates):

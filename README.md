@@ -213,6 +213,22 @@ explicit trust heuristic, not proof that the original integration made the edit.
 Like the ID-based fallback, it can allow later edits by whitelisted editors and
 cannot rule out earlier edits by others.
 
+Personal access tokens may be unable to retrieve historical editors: Notion can
+restrict user retrieval to the token's own authorized user. In that case, names
+cannot be verified. Explicitly trust a known historical editor's **user ID** instead:
+
+```shell
+python -m enex2notion Notebook.enex --use-env --reimport --whatif 5 --skip-changed-since-import --allow-last-editor-id 3b53f7bc-a447-8135-9613-002700121564 --operations-dir ./operations
+```
+
+`--allow-last-editor-id ID` accepts a user UUID (with or without hyphens) and
+can be repeated. The page and **every nested block** must have a last-editor ID
+on this list; missing or unlisted editors are rejected. No user lookup is made
+when this fallback qualifies, even if name/importer fallbacks are also enabled.
+Use user IDs from `last_edited_by.id`, not token, page, or integration IDs.
+This explicitly trusts those users: it can allow later edits by them and cannot
+rule out earlier edits by others. It does not verify their display names.
+
 Alternatively, allow only an initial five-second creation/edit window:
 
 ```shell
@@ -227,7 +243,7 @@ does not depend on editor identity or an import tag. Missing/invalid creation
 metadata is rejected. A long initial import may exceed the window, while human
 edits inside it cannot be distinguished from import activity.
 
-All three fallbacks require `--skip-changed-since-import`, apply only without a
+All four fallbacks require `--skip-changed-since-import`, apply only without a
 recorded baseline, and never override a changed baseline or date cutoff. If
 combined, **any** matching fallback can allow the note. Use the window alone
 when later edits must be skipped regardless of editor. Preview output identifies
